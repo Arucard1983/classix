@@ -1,4 +1,4 @@
-# A WIP for a potential gift for Darling.
+# Darling Super-Rosetta (WIP for a future merge to Darling)
 
 This fork is intended to refactor the original ClassiX as a PowerPC version of Rosetta to Darling handle PowerPC applications.
 
