@@ -24,7 +24,7 @@
 
 void CarbonLib_AFPCommand(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_ASPAbortOS(CarbonLib::Globals* globals, MachineState* state)
@@ -39,7 +39,7 @@ void CarbonLib_ASPCloseAll(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_ASPCloseSession(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_ASPGetParms(CarbonLib::Globals* globals, MachineState* state)
@@ -54,17 +54,17 @@ void CarbonLib_ASPGetStatus(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_ASPOpenSession(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_ASPUserCommand(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_ASPUserWrite(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_ATEvent(CarbonLib::Globals* globals, MachineState* state)
@@ -79,7 +79,7 @@ void CarbonLib_ATPKillAllGetReq(CarbonLib::Globals* globals, MachineState* state
 
 void CarbonLib_ATPLoad(CarbonLib::Globals* globals, MachineState* state)
 {
-	state->r3 = -97; //To stub a safe Not Avaliable Network using Apple Talk without crash the program
+	state->r3 = -98; //To stub a safe Not Avaliable Network using Apple Talk without crash the program
 }
 
 void CarbonLib_ATPreFlightEvent(CarbonLib::Globals* globals, MachineState* state)
@@ -154,7 +154,7 @@ void CarbonLib_LAPRmvATQ(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_MPPOpen(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -98; //To stub a safe Not Avaliable Network using Apple Talk without crash the program
 }
 
 void CarbonLib_NBPExtract(CarbonLib::Globals* globals, MachineState* state)
@@ -179,7 +179,7 @@ void CarbonLib_OpenXPP(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_PAddResponse(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PATalkClosePrep(CarbonLib::Globals* globals, MachineState* state)
@@ -194,17 +194,17 @@ void CarbonLib_PAttachPH(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_PCloseATPSkt(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PCloseSkt(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PConfirmName(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PDetachPH(CarbonLib::Globals* globals, MachineState* state)
@@ -214,12 +214,12 @@ void CarbonLib_PDetachPH(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_PGetAppleTalkInfo(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -1022; //To explicity tell to the program that AppleTalk is not avaliable without crash the program.
 }
 
 void CarbonLib_PGetRequest(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PKillGetReq(CarbonLib::Globals* globals, MachineState* state)
@@ -239,27 +239,27 @@ void CarbonLib_PKillSendReq(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_PLookupName(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PNSendRequest(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_POpenATPSkt(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_POpenSkt(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PRegisterName(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PRelRspCB(CarbonLib::Globals* globals, MachineState* state)
@@ -274,17 +274,17 @@ void CarbonLib_PRelTCB(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_PRemoveName(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PSendRequest(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PSendResponse(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PSetSelfSend(CarbonLib::Globals* globals, MachineState* state)
@@ -294,11 +294,11 @@ void CarbonLib_PSetSelfSend(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_PWriteDDP(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
 void CarbonLib_PWriteLAP(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "AppleTalk not Supported!");
+	state->r3 = -50; //To stub a safe Not Avaliable Error to the program handle it safely 
 }
 
