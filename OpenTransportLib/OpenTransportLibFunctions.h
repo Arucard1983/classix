@@ -56,6 +56,22 @@ extern "C"
 	void OpenTransportLib_OTSetAsynchronous(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
 	void OpenTransportLib_OTSetSynchronous(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
 	void OpenTransportLib_OTLook(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTInetStringToAddress(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTInetAddressToName(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTCreateConfiguration(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTRegisterAsClient(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTUnregisterAsClient(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTSndDisconnect(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTRcvDisconnect(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTSndOrderlyDisconnect(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTRcvOrderlyDisconnect(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTRemoveNotifier(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTSetSynchronous(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTAckSends(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTDontAckSends(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTIoctl(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTGetEndpointState(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
+	void OpenTransportLib_OTSync(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
 	void OpenTransportLib_OTUnknown(OpenTransportLib::Globals* globals, PPCVM::MachineState* state);
 }
 
