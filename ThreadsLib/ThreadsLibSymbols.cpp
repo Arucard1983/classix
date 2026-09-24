@@ -43,6 +43,7 @@ const char* LibraryCodeSymbolNames[] = {
 	"GetCurrentThread",
 	"ThreadEndCritical",
 	"SetThreadReadyGivenTaskRef",
+        "SetThreadReady",
 	"YieldToAnyThread",
 	nullptr
 };

@@ -55,6 +55,7 @@ extern "C"
 	void ThreadsLib_GetCurrentThread(ThreadsLib::Globals* globals, PPCVM::MachineState* state);
 	void ThreadsLib_ThreadEndCritical(ThreadsLib::Globals* globals, PPCVM::MachineState* state);
 	void ThreadsLib_SetThreadReadyGivenTaskRef(ThreadsLib::Globals* globals, PPCVM::MachineState* state);
+        void ThreadsLib_SetThreadReady(ThreadsLib::Globals* globals, PPCVM::MachineState* state);
 	void ThreadsLib_YieldToAnyThread(ThreadsLib::Globals* globals, PPCVM::MachineState* state);
 }
 
