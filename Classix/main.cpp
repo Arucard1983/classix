@@ -48,8 +48,32 @@
 #include "FancyDisassembler.h"
 #include "OStreamDisassemblyWriter.h"
 #include "DebugStub.h"
+#include "MachOContainer.h"
 
 const char endline = '\n';
+
+enum class ExecutableType {
+	Unknown,
+	PEF,
+	MachO_32,
+	MachO_64
+};
+
+static ExecutableType detectExecutableType(const std::string& path)
+{
+	std::ifstream file(path, std::ios::binary);
+	if (!file.is_open()) return ExecutableType::Unknown;
+
+	uint8_t bytes[4] = {0};
+	if (file.read(reinterpret_cast<char*>(bytes), 4)) {
+		uint32_t magic = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+
+		if (magic == 0x4A6F7921)      return ExecutableType::PEF;      // 'Joy!'
+		if (magic == 0xFEEDFACE)      return ExecutableType::MachO_32; // Mach-O PPC 32-bit
+		if (magic == 0xFEEDFACF)      return ExecutableType::MachO_64; // Mach-O PPC 64-bit
+	}
+	return ExecutableType::Unknown;
+}
 
 static char classChars[] = {
 	[PEF::SymbolClasses::CodeSymbol] = 'C',
@@ -58,6 +82,7 @@ static char classChars[] = {
 	[PEF::SymbolClasses::FunctionPointer] = 'F',
 	[PEF::SymbolClasses::GlueSymbol] = 'G'
 };
+
 
 static int listExports(const std::string& path)
 {
@@ -193,9 +218,20 @@ static int disassemble(const std::string& path)
 
 static int run(const std::string& path, int argc, const char* argv[], const char* envp[])
 {
+	ExecutableType exeType = detectExecutableType(path);
+	if (exeType == ExecutableType::Unknown) {
+		std::cerr << "Error: Unrecognisable Executable Format: " <<  path  << std::endl;
+		return -1;
+	}
+	
 	Common::NativeAllocator allocator;
 	OSEnvironment::NativeThreadManager threads;
 	OSEnvironment::Managers managers(allocator, threads);
+	Classix::VirtualMachine vm(allocator, managers);
+	
+	if (exeType == ExecutableType::PEF) {
+	
+	std::cout << "[ClassiX] Starting PEF Environment for Classic Programs..." << std::endl;
 	CFM::DummyLibraryResolver dummyResolver(allocator);
 	ClassixCore::DlfcnLibraryResolver dlfcnResolver(allocator, managers);
 	ClassixCore::BundleLibraryResolver bundleResolver(allocator, managers);
@@ -203,9 +239,34 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	dlfcnResolver.RegisterLibrary("StdCLib");
 	dlfcnResolver.RegisterLibrary("MathLib");
 	dlfcnResolver.RegisterLibrary("ThreadsLib");
-	bundleResolver.AllowLibrary("InterfaceLib");
+	dlfcnResolver.RegisterLibrary("OpenTransportLib");
+	bundleResolver.AllowLibrary("CarbonLib");
 	bundleResolver.AllowLibrary("ControlStripLib");
 	
+	
+	vm.AddLibraryResolver(dlfcnResolver);
+	vm.AddLibraryResolver(bundleResolver);
+	vm.AddLibraryResolver(dummyResolver);
+	
+	}
+	else if (exeType == ExecutableType::MachO_32) {
+		std::cout << "[ClassiX] Starting Mach-O PPC Environment..." << std::endl;
+		// static auto machoResolver = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
+		// vm.AddLibraryResolver(*machoResolver);
+		
+		std::cerr << "Warning: Mach-O Support under development." << std::endl;
+		return -2;
+	}
+	else if (exeType == ExecutableType::MachO_64) {
+		std::cerr << "[ClassiX] Power PC G5 (64-bit) binary detected!" << std::endl;
+		std::cerr << "ClassiX and Carbon framework under Darling environment only support 32-bit PPC." << std::endl;
+		return -3; // No guest 64-bit support
+	}
+        else
+        {
+         std::cerr << "Error: Unexpected file format." << std::endl;
+		return -3; //Unknown error
+        }
 	char* directory = strdup(path.c_str());
 	char* executableName = directory;
 	for (char* iter = directory; *iter != 0; iter++)
@@ -219,12 +280,7 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	chdir(directory);
 	std::string executable = executableName;
 	free(directory);
-	
-	Classix::VirtualMachine vm(allocator, managers);
-	vm.AddLibraryResolver(dlfcnResolver);
-	vm.AddLibraryResolver(bundleResolver);
-	vm.AddLibraryResolver(dummyResolver);
-	
+		
 	auto stub = vm.LoadMainContainer(executable);
 	return stub(argc, argv, envp);
 }
