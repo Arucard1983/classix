@@ -251,8 +251,8 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	}
 	else if (exeType == ExecutableType::MachO_32) {
 		std::cout << "[ClassiX] Starting Mach-O PPC Environment..." << std::endl;
-		// static auto machoResolver = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
-		// vm.AddLibraryResolver(*machoResolver);
+		static auto machoResolver = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
+		vm.AddLibraryResolver(*machoResolver);
 		
 		std::cerr << "Warning: Mach-O Support under development." << std::endl;
 		return -2;
@@ -262,11 +262,11 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 		std::cerr << "ClassiX and Carbon framework under Darling environment only support 32-bit PPC." << std::endl;
 		return -3; // No guest 64-bit support
 	}
-        else
-        {
+    else
+    {
          std::cerr << "Error: Unexpected file format." << std::endl;
 		return -3; //Unknown error
-        }
+	}
 	char* directory = strdup(path.c_str());
 	char* executableName = directory;
 	for (char* iter = directory; *iter != 0; iter++)
