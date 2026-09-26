@@ -229,12 +229,15 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	OSEnvironment::Managers managers(allocator, threads);
 	Classix::VirtualMachine vm(allocator, managers);
 	
-	if (exeType == ExecutableType::PEF) {
-	
-	std::cout << "[ClassiX] Starting PEF Environment for Classic Programs..." << std::endl;
+	std::unique_ptr<MachO::MachOLibraryResolver> machoResolver = nullptr;
 	CFM::DummyLibraryResolver dummyResolver(allocator);
 	ClassixCore::DlfcnLibraryResolver dlfcnResolver(allocator, managers);
 	ClassixCore::BundleLibraryResolver bundleResolver(allocator, managers);
+	
+	if (exeType == ExecutableType::PEF) {
+	
+	std::cout << "[ClassiX] Starting PEF Environment for Classic Programs..." << std::endl;
+	
 	
 	dlfcnResolver.RegisterLibrary("StdCLib");
 	dlfcnResolver.RegisterLibrary("MathLib");
@@ -251,11 +254,8 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	}
 	else if (exeType == ExecutableType::MachO_32) {
 		std::cout << "[ClassiX] Starting Mach-O PPC Environment..." << std::endl;
-		static auto machoResolver = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
+		machoResolver = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
 		vm.AddLibraryResolver(*machoResolver);
-		
-		std::cerr << "Warning: Mach-O Support under development." << std::endl;
-		return -2;
 	}
 	else if (exeType == ExecutableType::MachO_64) {
 		std::cerr << "[ClassiX] Power PC G5 (64-bit) binary detected!" << std::endl;
@@ -280,7 +280,8 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	chdir(directory);
 	std::string executable = executableName;
 	free(directory);
-		
+	
+	// Starting guest program
 	auto stub = vm.LoadMainContainer(executable);
 	return stub(argc, argv, envp);
 }
