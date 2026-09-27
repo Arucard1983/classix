@@ -30,6 +30,7 @@ void CarbonLib_ShutDwnInstall(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_ShutDwnPower(CarbonLib::Globals* globals, MachineState* state)
 {
+	globals->ipc().PerformAction<void>(IPCMessage::TerminateApplication);
 	exit(0);
 }
 
@@ -40,6 +41,7 @@ void CarbonLib_ShutDwnRemove(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_ShutDwnStart(CarbonLib::Globals* globals, MachineState* state)
 {
+	globals->ipc().PerformAction<void>(IPCMessage::TerminateApplication);
 	exit(0);
 }
 
