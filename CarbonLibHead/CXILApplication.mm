@@ -212,6 +212,7 @@ namespace
 
 static SEL ipcSelectors[] = {
 	IPC_INDEX(Beep) = @selector(beep),
+	IPC_INDEX(TerminateApplication) = @selector(terminateApplication),
 	IPC_INDEX(SetCursorVisibility) = @selector(setCursorVisibility),
 	IPC_INDEX(PeekNextEvent) = @selector(peekNextEvent),
 	IPC_INDEX(DequeueNextEvent) = @selector(discardNextEvent),
@@ -601,6 +602,13 @@ const size_t ipcSelectorCount = sizeof ipcSelectors / sizeof(SEL);
 {
 	[self expectDone];
 	NSBeep();
+	[self sendDone:_cmd];
+}
+
+-(void)terminateApplication
+{
+	[self expectDone];
+	[[NSApplication sharedApplication] terminate:nil];
 	[self sendDone:_cmd];
 }
 
