@@ -47,6 +47,9 @@
 // makes a beep
 -(void)beep;
 
+// requests application termination and performs cleanup
+-(void)terminateApplication;
+
 // sets cursor visibility
 -(void)setCursorVisibility;
 
