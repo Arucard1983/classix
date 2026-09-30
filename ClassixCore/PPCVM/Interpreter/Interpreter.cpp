@@ -29,6 +29,8 @@
 #include <sstream>
 #include <cassert>
 #include <dlfcn.h>
+#include <ffi.h>
+#include <unordered_map>
 #include "Todo.h"
 
 using namespace Common;
@@ -91,6 +93,92 @@ namespace PPCVM
 			return static_cast<const UInt32*>(*endAddress);
 		}
 
+     static void ExecuteMachOFFI_Integer(void* nativeFuncPtr, MachineState& state)
+        {
+            const size_t MAX_INT_ARGS = 8; 
+            ffi_cif cif;
+            ffi_type* args[MAX_INT_ARGS];
+            void* values[MAX_INT_ARGS];
+            
+            uint32_t ppcRegs[MAX_INT_ARGS] = {
+                state.r3, state.r4, state.r5, state.r6, state.r7, state.r8, state.r9, state.r10
+            };
+            
+            for (size_t i = 0; i < MAX_INT_ARGS; ++i) {
+                args[i] = &ffi_type_uint32;
+                values[i] = &ppcRegs[i];
+            }
+            
+            if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, MAX_INT_ARGS, &ffi_type_uint32, args) == FFI_OK) {
+                uint32_t rc;
+                ffi_call(&cif, FFI_FN(nativeFuncPtr), &rc, values);
+                state.r3 = rc; // Retorno padrão em r3
+            } else {
+                std::cerr << "[PPCVM FFI] Erro ao preparar CIF Inteira." << std::endl;
+            }
+        }
+
+        static void ExecuteMachOFFI_Float(void* nativeFuncPtr, MachineState& state)
+        {
+            const size_t MAX_FLOAT_ARGS = 4;
+            ffi_cif cif;
+            ffi_type* args[MAX_FLOAT_ARGS];
+            void* values[MAX_FLOAT_ARGS];
+            
+            double ppcFloats[MAX_FLOAT_ARGS] = {
+                state.f1, state.f2, state.f3, state.f4
+            };
+            
+            for (size_t i = 0; i < MAX_FLOAT_ARGS; ++i) {
+                args[i] = &ffi_type_double;
+                values[i] = &ppcFloats[i];
+            }
+            
+            if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, MAX_FLOAT_ARGS, &ffi_type_double, args) == FFI_OK) {
+                double rc;
+                ffi_call(&cif, FFI_FN(nativeFuncPtr), &rc, values);
+                state.f1 = rc; // Retorno de float padrão em f1
+            } else {
+                std::cerr << "[PPCVM FFI] Erro ao preparar CIF de Floating-Point." << std::endl;
+            }
+        }
+
+
+     static void ExecuteMachOFFI(void* nativeFuncPtr, MachineState& state)
+    {
+    // Para testes iniciais e funções POSIX padrão (como printf, open, write, etc.)
+    // Vamos assumir uma ABI genérica de até 6 argumentos numéricos/ponteiros.
+    // Dica: Para suporte total, idealmente lerás metadados da assinatura da função.
+    const size_t MAX_ARGS = 6; 
+    
+    ffi_cif cif;
+    ffi_type* args[MAX_ARGS];
+    void* values[MAX_ARGS];
+    
+    // Mapeia os registadores do G3 (r3 a r8) para os argumentos da FFI
+    uint32_t ppcRegs[MAX_ARGS] = {
+        state.r3, state.r4, state.r5, state.r6, state.r7, state.r8
+    };
+    
+    for (size_t i = 0; i < MAX_ARGS; ++i) {
+        args[i] = &ffi_type_uint32; // Em sistemas 32-bit (PPC Mac OS X), a maior parte é 32-bit
+        values[i] = &ppcRegs[i];
+    }
+    
+    // Configura a Interface de Função Externa (CIF) para retorno de 32-bit (int)
+    if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, MAX_ARGS, &ffi_type_uint32, args) == FFI_OK) {
+        uint32_t rc;
+        // Executa a chamada nativa no Host Intel!
+        ffi_call(&cif, FFI_FN(nativeFuncPtr), &rc, values);
+        
+        // Coloca o resultado de volta no registador de retorno padrão do PowerPC (r3)
+        state.r3 = rc;
+    } else {
+        std::cerr << "[PPCVM FFI] Erro crítico ao preparar CIF da libffi." << std::endl;
+    }
+   }
+
+
 		void Interpreter::Panic(const std::string& error)
 		{
 			throw PanicException(error);
@@ -131,35 +219,53 @@ namespace PPCVM
 		}
 		
 		const UInt32* Interpreter::ExecuteNative(const NativeCall* function)
-		{
-			assert(function->Tag == NativeTag && "Invalid call header");
-			
+{
+    assert(function->Tag == NativeTag && "Invalid call header");
+    
+    // 1. O PULO DO GATO: Descobrir o endereço virtual do Guest onde este NativeTag reside
+    uint32_t currentVirtualAddr = allocator.ToIntPtr(function);
+    
+    // 2. Verificar se este endereço foi gerado pelo nosso ecossistema Mach-O
+    auto it = MachO::NativeBridgeMap.find(currentVirtualAddr);
+    if (it != MachO::NativeBridgeMap.end())
+    {
 #ifdef DEBUG_DISASSEMBLE
-			if (getenv("DEBUG_DISASSEMBLE"))
-			{
-				Dl_info symInfo;
-				if (dladdr((const void*)function->Callback, &symInfo) != 0)
-				{
-					if (symInfo.dli_sname != nullptr)
-					{
-						std::cerr << "\t> Calling into [" << BaseName(symInfo.dli_fname) << "::" << symInfo.dli_sname << "]" << std::endl;
-					}
-					else
-					{
-						std::cerr << "\t> Calling into unidentified symbol from [" << symInfo.dli_fname << "]" << std::endl;
-					}
-				}
-				else
-				{
-					std::cerr << "\t> Calling into unknown native function" << std::endl;
-				}
-			}
+        if (getenv("DEBUG_DISASSEMBLE")) {
+            std::cerr << "\t> [Mach-O Intel Bridge] Redirecionando stub 0x" 
+                      << std::hex << currentVirtualAddr << " via libffi" << std::dec << std::endl;
+        }
 #endif
-			
-			void* libGlobals = allocator.ToPointer<void>(state.r2);
-			function->Callback(libGlobals, &state);
-			return allocator.ToPointer<UInt32>(state.lr);
-		}
+        void* nativeIntelFunction = it->second;
+        
+        // Executa a nossa ponte libffi
+        ExecuteMachOFFI(nativeIntelFunction, state);
+        
+        // Retorna o Link Register (LR) para que o interpretador saiba para onde voltar no código G3
+        return allocator.ToPointer<UInt32>(state.lr);
+    }
+    
+    // 3. Fallback: Se não for Mach-O, mantém o comportamento original do ClassiX (PEF/CFM)
+#ifdef DEBUG_DISASSEMBLE
+    if (getenv("DEBUG_DISASSEMBLE"))
+    {
+        Dl_info symInfo;
+        if (dladdr((const void*)function->Callback, &symInfo) != 0)
+        {
+            if (symInfo.dli_sname != nullptr) {
+                std::cerr << "\t> Calling into [" << BaseName(symInfo.dli_fname) << "::" << symInfo.dli_sname << "]" << std::endl;
+            } else {
+                std::cerr << "\t> Calling into unidentified symbol from [" << symInfo.dli_fname << "]" << std::endl;
+            }
+        } else {
+            std::cerr << "\t> Calling into unknown native function" << std::endl;
+        }
+    }
+#endif
+    
+    void* libGlobals = allocator.ToPointer<void>(state.r2);
+    function->Callback(libGlobals, &state);
+    return allocator.ToPointer<UInt32>(state.lr);
+}
 
 		void Interpreter::ExecuteUntilBranch(const UInt32* address)
 		{
