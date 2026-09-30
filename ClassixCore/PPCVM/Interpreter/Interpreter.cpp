@@ -218,54 +218,69 @@ namespace PPCVM
 				expected = nullptr;
 		}
 		
-		const UInt32* Interpreter::ExecuteNative(const NativeCall* function)
-{
-    assert(function->Tag == NativeTag && "Invalid call header");
-    
-    // 1. O PULO DO GATO: Descobrir o endereço virtual do Guest onde este NativeTag reside
-    uint32_t currentVirtualAddr = allocator.ToIntPtr(function);
-    
-    // 2. Verificar se este endereço foi gerado pelo nosso ecossistema Mach-O
-    auto it = MachO::NativeBridgeMap.find(currentVirtualAddr);
-    if (it != MachO::NativeBridgeMap.end())
-    {
+        const UInt32* Interpreter::ExecuteNative(const NativeCall* function)
+		{
+			assert(function->Tag == NativeTag && "Invalid call header");
+			
+			// 1. O PULO DO GATO: Descobrir o endereço virtual do Guest onde este NativeTag reside
+			uint32_t currentVirtualAddr = allocator.ToIntPtr(function);
+			
+			// 2. Verificar se este endereço pertence a um Stub gerado pelo nosso ambiente Mach-O
+			auto it = MachO::NativeBridgeMap.find(currentVirtualAddr);
+			if (it != MachO::NativeBridgeMap.end())
+			{
 #ifdef DEBUG_DISASSEMBLE
-        if (getenv("DEBUG_DISASSEMBLE")) {
-            std::cerr << "\t> [Mach-O Intel Bridge] Redirecionando stub 0x" 
-                      << std::hex << currentVirtualAddr << " via libffi" << std::dec << std::endl;
-        }
+				if (getenv("DEBUG_DISASSEMBLE"))
+				{
+					std::cerr << "\t> [Mach-O Intel Bridge] Redirecionando stub 0x" 
+					          << std::hex << currentVirtualAddr 
+					          << (it->second.type == MachO::SymbolType::Float ? " (Float)" : " (Integer)")
+					          << " via libffi" << std::dec << std::endl;
+				}
 #endif
-        void* nativeIntelFunction = it->second;
-        
-        // Executa a nossa ponte libffi
-        ExecuteMachOFFI(nativeIntelFunction, state);
-        
-        // Retorna o Link Register (LR) para que o interpretador saiba para onde voltar no código G3
-        return allocator.ToPointer<UInt32>(state.lr);
-    }
-    
-    // 3. Fallback: Se não for Mach-O, mantém o comportamento original do ClassiX (PEF/CFM)
+				void* nativeIntelFunction = it->second.functionPtr;
+				
+				// Desvia para a função FFI universal correta com base no tipo de símbolo
+				if (it->second.type == MachO::SymbolType::Float)
+				{
+					ExecuteMachOFFI_Float(nativeIntelFunction, state);
+				}
+				else
+				{
+					ExecuteMachOFFI_Integer(nativeIntelFunction, state);
+				}
+				
+				// Retorna o Link Register (LR) para o interpretador saber para onde voltar no código G3
+				return allocator.ToPointer<UInt32>(state.lr);
+			}
+			
+			// 3. Fallback: Se não for um símbolo Mach-O, mantém o comportamento original do ClassiX (PEF/CFM)
 #ifdef DEBUG_DISASSEMBLE
-    if (getenv("DEBUG_DISASSEMBLE"))
-    {
-        Dl_info symInfo;
-        if (dladdr((const void*)function->Callback, &symInfo) != 0)
-        {
-            if (symInfo.dli_sname != nullptr) {
-                std::cerr << "\t> Calling into [" << BaseName(symInfo.dli_fname) << "::" << symInfo.dli_sname << "]" << std::endl;
-            } else {
-                std::cerr << "\t> Calling into unidentified symbol from [" << symInfo.dli_fname << "]" << std::endl;
-            }
-        } else {
-            std::cerr << "\t> Calling into unknown native function" << std::endl;
-        }
-    }
+			if (getenv("DEBUG_DISASSEMBLE"))
+			{
+				Dl_info symInfo;
+				if (dladdr((const void*)function->Callback, &symInfo) != 0)
+				{
+					if (symInfo.dli_sname != nullptr)
+					{
+						std::cerr << "\t> Calling into [" << BaseName(symInfo.dli_fname) << "::" << symInfo.dli_sname << "]" << std::endl;
+					}
+					else
+					{
+						std::cerr << "\t> Calling into unidentified symbol from [" << symInfo.dli_fname << "]" << std::endl;
+					}
+				}
+				else
+				{
+					std::cerr << "\t> Calling into unknown native function" << std::endl;
+				}
+			}
 #endif
-    
-    void* libGlobals = allocator.ToPointer<void>(state.r2);
-    function->Callback(libGlobals, &state);
-    return allocator.ToPointer<UInt32>(state.lr);
-}
+			
+			void* libGlobals = allocator.ToPointer<void>(state.r2);
+			function->Callback(libGlobals, &state);
+			return allocator.ToPointer<UInt32>(state.lr);
+		}
 
 		void Interpreter::ExecuteUntilBranch(const UInt32* address)
 		{
