@@ -23,9 +23,48 @@
 
 namespace OSEnvironment
 {
-	Gestalt::Gestalt()
+	Gestalt::Gestalt(bool LegacyMode)
 	{
-		SetValue("sysv", 0x0922);
+		//Common values
+		SetValue('cput', 11);         // PowerPC G3
+        SetValue('proc', 5);          // PowerPC
+        SetValue('carb', 1);          // Carbon is present
+        SetValue('carv', 0x01608000); // CarbonLib 1.6+
+        SetValue('otvr', 0x02768000); // OpenTransport v2.7.6
+        SetValue('otau', 1);          // OpenTransport enabled
+        SetValue('fs  ', 0x0000000F); // Modern FS (POSIX/Darling)
+        SetValue('vol ', 0x00003BFF); // Unix Permissions
+        SetValue('thng', 0x00010000); // Thread-Safe Component Manager
+        SetValue('menu', 0x00000003); // Carbon Menu Manager
+        SetValue('cntl', 0x0000000F); // Embedded Controls
+        SetValue('appr', 0x01010000); // Appearance Manager OS X
+		
+		if(LegacyMode)
+		{
+          // Set OS 9.2.2 emulation
+		  SetValue('sysv', 0x0922);
+          SetValue('sys1', 9);
+          SetValue('sys2', 2);
+          SetValue('sys3', 2);
+
+		  //Classic Environment enabled
+		  SetValue('clsc', 1);          //Enable Classic Sandbox
+		  SetValue('macv', 4);          //Set Mac version
+          SetValue('sysa', 0x00000200); //Set system attributes
+		}
+		else
+		{
+          // Set OS 10.4.11 emulation
+		  SetValue('sysv', 0x1039);
+          SetValue('sys1', 10);
+          SetValue('sys2', 4);
+          SetValue('sys3', 11);
+
+		  //Classic Environment disabled
+		  SetValue('clsc', 0);          //Enable Classic Sandbox
+		  SetValue('macv', 5);          //Set Mac version
+          SetValue('sysa', 0x00000010); //Set system attributes
+		}
 	}
 	
 	void Gestalt::SetValue(uint32_t key, int32_t value)
