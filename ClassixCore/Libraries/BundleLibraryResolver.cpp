@@ -176,6 +176,27 @@ namespace ClassixCore
 	
 	CFM::SymbolResolver* BundleLibraryResolver::ResolveLibrary(const std::string& name)
 	{
+		std::string targetName = name;
+	    auto overrideIter = m_overrides.find(name);
+	
+	     // 1. Check Overriding cases
+	    if (overrideIter != m_overrides.end())
+	     {
+		    targetName = overrideIter->second; // Ex: Transform "InterfaceLib" to "CarbonLib"
+		
+		// 2. Since the only case is hardcode, let's set the Gestalt
+		  if (name == "InterfaceLib")
+		  {
+			// Set OS 9.2.2 mode
+			managers.Gestalt().SetLegacyMode(true);
+		  }
+		  else
+		  {
+			// Set OS 10.4.11 mode
+			managers.Gestalt().SetLegacyMode(false);
+		  }  
+	     }
+		// 3. Follow the rest as the old code
 		if (allowedBundles.find(name) != allowedBundles.end())
 		{
 			auto iter = allBundles.find(name);
