@@ -11,8 +11,16 @@
 
 namespace MachO
 {
-    // Mapa global externo que o teu interpretador PPCVM vai ler ao intercetar a Trap
-    extern std::unordered_map<uint32_t, void*> NativeBridgeMap;
+    enum class SymbolType { Integer, Float };
+
+    struct NativeBridgeTarget {
+        void* functionPtr;
+        SymbolType type;
+    };
+
+    extern std::unordered_map<uint32_t, NativeBridgeTarget> NativeBridgeMap;
+     // Mapa global externo que o teu interpretador PPCVM vai ler ao intercetar a Trap
+    //extern std::unordered_map<uint32_t, void*> NativeBridgeMap;
 
     class MachOSymbolResolver : public CFM::SymbolResolver
     {
