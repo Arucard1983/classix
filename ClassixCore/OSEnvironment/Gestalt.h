@@ -45,6 +45,7 @@ namespace OSEnvironment
 	public:
 		Gestalt(){this->Gestalt(true);};
         Gestalt(bool LegacyMode);
+		void SetLegacyMode(bool legacyMode);
 		
 		template<typename TType, typename... TParams>
 		void SetCallback(uint32_t key, TParams&&... args)
