@@ -90,7 +90,7 @@ void CarbonLib_ReplaceGestalt(CarbonLib::Globals* globals, MachineState* state)
 
 void CarbonLib_ReplaceGestaltValue(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	tate->r3 = -5553; // gestaltResourceErr
 }
 
 void CarbonLib_SetGestaltValue(CarbonLib::Globals* globals, MachineState* state)
