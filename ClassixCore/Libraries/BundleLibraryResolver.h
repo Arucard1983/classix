@@ -54,6 +54,7 @@ namespace ClassixCore
 		std::unordered_set<std::string> allowedBundles;
 		std::deque<BundleLibrary> loadedLibraries;
 		std::deque<NativeSymbolResolver> resolvers;
+        std::unordered_map<std::string, std::string> m_overrides;
 		
 	public:
 		explicit BundleLibraryResolver(Common::Allocator& allocator, OSEnvironment::Managers& managers, const std::string& directoryPath = ".");
