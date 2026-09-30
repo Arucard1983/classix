@@ -168,6 +168,11 @@ namespace ClassixCore
 	{
 		allowedBundles.insert(cfmName);
 	}
+
+    void BundleLibraryResolver::OverrideLibrary(const std::string& oldLib, const std::string& newLib)
+	{
+		m_overrides[oldLib] = newLib;
+	}
 	
 	CFM::SymbolResolver* BundleLibraryResolver::ResolveLibrary(const std::string& name)
 	{
