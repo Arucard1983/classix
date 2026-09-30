@@ -50,7 +50,7 @@ namespace OSEnvironment
 		  //Classic Environment enabled
 		  SetValue("clsc", 1);          //Enable Classic Sandbox
 		  SetValue("macv", 4);          //Set Mac version
-          SetValue('sysa', 0x00000200); //Set system attributes
+          SetValue("sysa", 0x00000200); //Set system attributes
 		}
 		else
 		{
