@@ -271,28 +271,26 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	else if (exeType == ExecutableType::MachO_32) {
 		std::cout << "[ClassiX] Starting Mach-O PPC Environment..." << std::endl;
 		// Create the Environmrnt for Mach-O programs.
-        MachO::MachOLibraryResolver machoEnv(allocator, managers);
-        // Setup  MachOLibraryResolver with LibFFI
-        machoEnv.SetupLibraryStubs();
+        auto machoEnv = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
         vm.AddLibraryResolver(machoEnv);
 		
-	    char* directory = strdup(path.c_str());
-	    char* executableName = directory;
-	    for (char* iter = directory; *iter != 0; iter++)
-	    {
-		 if (*iter == '/')
-			executableName = iter;
-	    }
-	     *executableName = 0;
-	      executableName++;
-	
-	      chdir(directory);
-	      std::string executable = executableName;
-      	  free(directory);
+	    //Starting the Mach-O program
+		std::string directory = ".";
+		std::string executable = path;
+		size_t lastSlash = path.find_last_of('/');
+		
+		if (lastSlash != std::string::npos) {
+			directory = path.substr(0, lastSlash);
+			executable = path.substr(lastSlash + 1);
+		}
+		
+		if (chdir(directory.c_str()) != 0) {
+			std::cerr << "[ClassiX] Warning: Could not change directory to " << directory << std::endl;
+		}
 	
 	       // Starting guest program
 	      auto stub = vm.LoadMachOContainer(executable); //mach-O uses a different foundation!
-	      return stub(argc, argv, envp);
+	      return stub(argc, argv, reinterpret_cast<const char**>(envp));
 	}
 	else if (exeType == ExecutableType::MachO_64) {
 		std::cerr << "[ClassiX] Power PC G5 (64-bit) binary detected!" << std::endl;
