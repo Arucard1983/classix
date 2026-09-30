@@ -229,7 +229,6 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	OSEnvironment::Managers managers(allocator, threads);
 	Classix::VirtualMachine vm(allocator, managers);
 	
-	std::unique_ptr<MachO::MachOLibraryResolver> machoResolver = nullptr;
 	CFM::DummyLibraryResolver dummyResolver(allocator);
 	ClassixCore::DlfcnLibraryResolver dlfcnResolver(allocator, managers);
 	ClassixCore::BundleLibraryResolver bundleResolver(allocator, managers);
@@ -237,8 +236,7 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	if (exeType == ExecutableType::PEF) {
 	
 	std::cout << "[ClassiX] Starting PEF Environment for Classic Programs..." << std::endl;
-	
-	
+		
 	dlfcnResolver.RegisterLibrary("StdCLib");
 	dlfcnResolver.RegisterLibrary("MathLib");
 	dlfcnResolver.RegisterLibrary("ThreadsLib");
@@ -247,16 +245,53 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	bundleResolver.AllowLibrary("ControlStripLib");
     bundleResolver.OverrideLibrary("InterfaceLib","CarbonLib");
 	
-	
 	vm.AddLibraryResolver(dlfcnResolver);
 	vm.AddLibraryResolver(bundleResolver);
 	vm.AddLibraryResolver(dummyResolver);
+
+	char* directory = strdup(path.c_str());
+	char* executableName = directory;
+	for (char* iter = directory; *iter != 0; iter++)
+	{
+		if (*iter == '/')
+			executableName = iter;
+	}
+	*executableName = 0;
+	executableName++;
+	
+	chdir(directory);
+	std::string executable = executableName;
+	free(directory);
+	
+	// Starting guest program
+	auto stub = vm.LoadMainContainer(executable);
+	return stub(argc, argv, envp);
 	
 	}
 	else if (exeType == ExecutableType::MachO_32) {
 		std::cout << "[ClassiX] Starting Mach-O PPC Environment..." << std::endl;
-		machoResolver = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
-		vm.AddLibraryResolver(*machoResolver);
+		// Create the Environmrnt for Mach-O programs.
+        MachO::MachOLibraryResolver machoEnv(allocator, managers);
+        // Setup  MachOLibraryResolver with LibFFI
+        machoEnv.SetupLibraryStubs();
+
+	    char* directory = strdup(path.c_str());
+	    char* executableName = directory;
+	    for (char* iter = directory; *iter != 0; iter++)
+	    {
+		 if (*iter == '/')
+			executableName = iter;
+	    }
+	     *executableName = 0;
+	      executableName++;
+	
+	      chdir(directory);
+	      std::string executable = executableName;
+      	  free(directory);
+	
+	       // Starting guest program
+	      auto stub = vm.LoadMachOContainer(executable); //mach-O uses a different foundation!
+	      return stub(argc, argv, envp);
 	}
 	else if (exeType == ExecutableType::MachO_64) {
 		std::cerr << "[ClassiX] Power PC G5 (64-bit) binary detected!" << std::endl;
