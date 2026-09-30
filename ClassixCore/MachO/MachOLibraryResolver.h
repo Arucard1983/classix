@@ -6,22 +6,38 @@
 #ifndef __Classix__MachOLibraryResolver__
 #define __Classix__MachOLibraryResolver__
 
-#include <ffi.h> // Infraestrutura da libffi
-#include <map>
+#include "LibraryResolver.h"
+#include "SymbolResolver.h"
+#include "Managers.h"
+#include "NativeAllocator.h"
+#include <ffi.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <string>
+#include <vector>
+#include <memory>
 
 namespace MachO
 {
-    enum class SymbolType { Integer, Float };
-
-    struct NativeBridgeTarget {
-        void* functionPtr;
-        SymbolType type;
+    // Tipos de dados suportados pela nossa ponte dinâmica com a libffi
+    enum class FFIType {
+        Integer,
+        Pointer,
+        Double
     };
 
-    extern std::unordered_map<uint32_t, NativeBridgeTarget> NativeBridgeMap;
-     // Mapa global externo que o teu interpretador PPCVM vai ler ao intercetar a Trap
-    //extern std::unordered_map<uint32_t, void*> NativeBridgeMap;
+    // Metadados completos de cada símbolo intercetado no binário Mach-O
+    struct NativeBridgeTarget {
+        void* functionPtr;
+        std::string symbolName;
+        std::vector<FFIType> argTypes;
+        FFIType returnType;
+    };
 
+    // O mapa global que serve de ponte entre os Stubs virtuais PPC e as funções nativas do Host
+    extern std::unordered_map<uint32_t, NativeBridgeTarget> NativeBridgeMap;
+
+    // Resolver responsável por criar stubs individuais para cada função (ex: printf, sqrt)
     class MachOSymbolResolver : public CFM::SymbolResolver
     {
     private:
@@ -33,13 +49,14 @@ namespace MachO
         virtual uint32_t Resolve(const std::string& symbolName, CFM::SymbolClasses symbolClass) override;
     };
 
+    // Resolver de alto nível que interceta o carregamento de dylibs como a libSystem
     class MachOLibraryResolver : public CFM::LibraryResolver
     {
     private:
         Common::Allocator& allocator;
         OSEnvironment::Managers& managers;
         std::unordered_set<std::string> allowedLibraries;
-        std::unique_ptr<MachOSymbolResolver> resolverInstance; // Gestão limpa da instância
+        std::unique_ptr<MachOSymbolResolver> resolverInstance;
 
     public:
         MachOLibraryResolver(Common::Allocator& allocator, OSEnvironment::Managers& managers);
