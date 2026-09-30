@@ -82,6 +82,27 @@ namespace Classix
 		eip = vm.interpreter.ExecuteUntil(eip, until);
 		pc = vm.allocator.ToIntPtr(eip);
 	}
+
+    uint32_t MachOProgramControlHandle::RunFromAddress(uint32_t entryAddress)
+    {
+        auto threadMarker = vm.managers.ThreadManager().CreateExecutionMarker();
+        
+        // Inicializa o estado dos registadores da máquina para a ABI do Mach-O
+        vm.state.r1 = vm.allocator.ToIntPtr(stackInfo.sp - 16); // Stack alignment
+        vm.state.r3 = stackInfo.argc;
+        vm.state.r4 = vm.allocator.ToIntPtr(stackInfo.argv);
+        vm.state.r5 = vm.allocator.ToIntPtr(stackInfo.envp);
+        
+        // Define o endereço de retorno (LR) para o endereço de terminação do interpretador
+        vm.state.lr = vm.allocator.ToIntPtr(vm.interpreter.GetEndAddress());
+        
+        // Executa o interpretador PPC a partir do Entry Point nativo do Mach-O
+        uint32_t pc = entryAddress;
+        vm.interpreter.Execute(vm.allocator.ToPointer<Common::UInt32>(pc));
+        
+        return vm.state.r3; // Retorno padrão em r3
+    }
+
 	
 	MainStub::MainStub(VirtualMachine& vm, CFM::ResolvedSymbol mainSymbol)
 	: vm(vm), mainSymbol(mainSymbol)
@@ -138,4 +159,52 @@ namespace Classix
 		}
 		throw std::logic_error("Container does not contain a main symbol");
 	}
+
+    MachOMainStub VirtualMachine::LoadMachOContainer(const std::string& path)
+    {
+    // 1. Mapear o ficheiro binário Mach-O para a memória do host
+    // Nota: Usamos a infraestrutura nativa do ClassiX para mapeamento de ficheiros
+    auto mapping = std::make_shared<Common::FileMapping>(path);
+    
+    // 2. Instanciar o teu parser Mach-O passando o alocador e os limites do ficheiro
+    // Isto vai validar o header PPC e processar os Load Commands (Segmentos, Dylibs, etc.)
+    auto container = std::make_unique<MachO::MachOContainer>(allocator, mapping->begin(), mapping->end());
+    
+    // 3. Mapear os segmentos parsed pelo container para a memória virtual do PPCVM
+    for (const auto& segment : container->GetSegments())
+    {
+        // Ignora segmentos que não têm dados ou tamanho virtual mapeável
+        if (segment.vmSize == 0) continue;
+
+        // Aloca espaço na memória virtual do Guest (PPC) respeitando o endereço desejado (vmAddr)
+        // No ecossistema Mach-O, os segmentos pedem endereços virtuais fixos específicos
+        void* guestTargetMem = allocator.MapVirtual(segment.vmAddr, segment.vmSize, segment.initProt);
+        
+        if (segment.dataPtr && segment.fileSize > 0)
+        {
+            // Copia os dados reais do ficheiro mapeado para o espaço de endereçamento do Guest PPC
+            std::memcpy(guestTargetMem, segment.dataPtr, segment.fileSize);
+        }
+        
+        // Se o tamanho na memória (vmSize) for maior que o tamanho no ficheiro (fileSize),
+        // o restante deve ser preenchido com zeros (comportamento padrão de seções .bss)
+        if (segment.vmSize > segment.fileSize)
+        {
+            size_t bssSize = segment.vmSize - segment.fileSize;
+            uint8_t* bssPtr = static_cast<uint8_t*>(guestTargetMem) + segment.fileSize;
+            std::memset(bssPtr, 0, bssSize);
+        }
+    }
+
+    // 4. Extrair o Entry Point que o teu parser obteve através do LC_UNIXTHREAD
+    uint32_t entryPoint = container->GetEntryPoint();
+    if (entryPoint == 0)
+    {
+        throw std::runtime_error("[MachO Loader] Falha crítica: Nenhum Entry Point válido foi encontrado no binário.");
+    }
+
+    // 5. Retornar o Stub inicializador configurado com o endereço de entrada
+    // O operador () deste stub irá despoletar a execução no interpretador PPCVM
+    return MachOMainStub(*this, entryPoint);
+  }
 }
