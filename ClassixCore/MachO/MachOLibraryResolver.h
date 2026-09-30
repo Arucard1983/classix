@@ -6,6 +6,9 @@
 #ifndef __Classix__MachOLibraryResolver__
 #define __Classix__MachOLibraryResolver__
 
+#include <ffi.h> // Infraestrutura da libffi
+#include <map>
+
 namespace MachO
 {
     // Mapa global externo que o teu interpretador PPCVM vai ler ao intercetar a Trap
