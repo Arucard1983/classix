@@ -66,7 +66,37 @@ namespace OSEnvironment
           SetValue("sysa", 0x00000010); //Set system attributes
 		}
 	}
-	
+
+   void Gestalt::SetLegacyMode(bool legacyMode)
+  {
+    if (legacyMode)
+    {
+        //Override OS 9.2.2
+        SetValue("sysv", 0x0922);
+        SetValue("sys1", 9);
+        SetValue("sys2", 2);
+        SetValue("sys3", 2);
+
+        // Classic Environment enabled
+        SetValue("clsc", 1);          
+        SetValue("macv", 4);          
+        SetValue("sysa", 0x00000200); 
+    }
+    else
+    {
+        // Override OS 10.4.11
+        SetValue("sysv", 0x104B);
+        SetValue("sys1", 10);
+        SetValue("sys2", 4);
+        SetValue("sys3", 11);
+
+        // Classic Environment disabled
+        SetValue("clsc", 0);          
+        SetValue("macv", 5);          
+        SetValue("sysa", 0x00000010); 
+    }
+  }
+
 	void Gestalt::SetValue(uint32_t key, int32_t value)
 	{
 		auto iter = callbackValues.find(key);
