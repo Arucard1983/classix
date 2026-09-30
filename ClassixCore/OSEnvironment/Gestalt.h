@@ -43,7 +43,8 @@ namespace OSEnvironment
 		std::unordered_map<uint32_t, std::unique_ptr<GestaltCallback>> callbackValues;
 		
 	public:
-		Gestalt();
+		Gestalt(){this->Gestalt(true);};
+        Gestalt(bool LegacyMode);
 		
 		template<typename TType, typename... TParams>
 		void SetCallback(uint32_t key, TParams&&... args)
