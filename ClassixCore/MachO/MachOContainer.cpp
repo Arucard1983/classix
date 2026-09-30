@@ -124,11 +124,27 @@ namespace MachO
               }
             }
             else if (cmdType == LC_UNIXTHREAD) {
-                // PPC flavor state will be stored after command header
-                // The exact offset depends from the thread flavor of OS X PPC (normally flavor 1 for PPC_THREAD_STATE)
-                // The field with SRR0 (Instruction Pointer) will be our entryPoint.
-                std::cout << "[MachO Parser] UnixThread (Entry point stub) found." << std::endl;
-            }
+    std::cout << "[MachO Parser] UnixThread Command detected." << std::endl;
+    
+    // Proteção de limites mínima para ler o cabeçalho do flavor
+    if (cmdSize >= sizeof(load_command) + 8) {
+        const uint32_t* threadStatePtr = reinterpret_cast<const uint32_t*>(currentCmdPtr + sizeof(load_command));
+        
+        uint32_t flavor = Read32(threadStatePtr[0]); // 1 = PPC_THREAD_STATE
+        uint32_t count  = Read32(threadStatePtr[1]);
+        
+        if (flavor == 1 && count >= 40) { // PPC_THREAD_STATE tem tipicamente 40 dwords
+            // O registador SRR0 (Instruction Pointer / Entry Point) é o primeiro elemento do estado
+            uint32_t srr0 = Read32(threadStatePtr[2]);
+            
+            entryPoint = srr0;
+            std::cout << "[MachO Parser] Entry Point (SRR0) found: 0x" 
+                      << std::hex << entryPoint << std::dec << std::endl;
+        } else {
+            std::cerr << "[MachO Parser] Unsupported thread flavor (" << flavor << ") or invalid count." << std::endl;
+        }
+     }
+   }
             
             currentCmdPtr += cmdSize;
         }
