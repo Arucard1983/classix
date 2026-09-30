@@ -274,7 +274,8 @@ static int run(const std::string& path, int argc, const char* argv[], const char
         MachO::MachOLibraryResolver machoEnv(allocator, managers);
         // Setup  MachOLibraryResolver with LibFFI
         machoEnv.SetupLibraryStubs();
-
+        vm.AddLibraryResolver(machoEnv);
+		
 	    char* directory = strdup(path.c_str());
 	    char* executableName = directory;
 	    for (char* iter = directory; *iter != 0; iter++)
