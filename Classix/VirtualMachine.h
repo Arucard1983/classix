@@ -33,6 +33,8 @@
 #include "PEFLibraryResolver.h"
 #include "StackPreparator.h"
 #include "Managers.h"
+#include "MachOContainer.h"
+#include "MachOLibraryResolver.h"
 
 namespace Classix
 {
@@ -43,6 +45,9 @@ namespace Classix
 	{
 		friend class MainStub;
 		friend class ProgramControlHandle;
+
+        class MachOMainStub; 
+	    class MachOProgramControlHandle;
 		
 		PPCVM::MachineState state;
 		Common::Allocator& allocator;
@@ -61,11 +66,17 @@ namespace Classix
 		void AddLibraryResolver(CFM::LibraryResolver& resolver);
 		
 		MainStub LoadMainContainer(const std::string& path);
+
+        MachOMainStub LoadMachOContainer(const std::string& path);
 	};
 	
 	class ProgramControlHandle
 	{
 		friend class MainStub;
+
+        friend class ProgramControlHandle;
+		friend class MachOMainStub;
+		friend class MachOProgramControlHandle;
 		
 		VirtualMachine& vm;
 		Common::AutoAllocation stack;
@@ -149,6 +160,67 @@ namespace Classix
 			return Instantiate(argBegin, argEnd, envBegin, envEnd).RunSymbol(mainSymbol);
 		}
 	};
+
+ class MachOProgramControlHandle
+	{
+		friend class MachOMainStub;
+		
+		VirtualMachine& vm;
+		Common::AutoAllocation stack;
+		Common::StackPreparator::StackInfo stackInfo;
+		
+		// O ThreadHelper do seu ecossistema Mach-O entra aqui para gerenciar 
+		// o contexto de registradores desta thread de execução
+		// MachO::MachOThreadHelper threadHelper; 
+
+		template<typename TArgumentIterator, typename TEnvironIterator>
+		MachOProgramControlHandle(VirtualMachine& vm, uint32_t stackSize, TArgumentIterator argBegin, TArgumentIterator argEnd, TEnvironIterator envBegin, TEnvironIterator envEnd)
+		: vm(vm), stack(vm.allocator.AllocateAuto("MachOStack", stackSize))
+		{
+			Common::StackPreparator stackPrep;
+			stackPrep.AddArguments(argBegin, argEnd);
+			stackPrep.AddEnvironmentVariables(envBegin, envEnd);
+			
+			stackInfo = stackPrep.WriteStack(static_cast<char*>(*stack), stack.GetVirtualAddress(), stackSize);
+			
+			// Nota: O Mach-O inicializa suas bibliotecas dinâmicas através de funções 
+			// apontadas por seções como "__mod_init_func" em vez do CFM fragmentManager.
+			// É aqui que o seu parser do MachOContainer vai injetar os pontos de inicialização.
+		}
+		
+	public:
+		uint32_t RunFromAddress(uint32_t entryAddress);
+	};
+
+	class MachOMainStub
+	{
+		friend class VirtualMachine;
+		
+		VirtualMachine& vm;
+		uint32_t machOEntryPoint; // Endereço direto obtido do LC_MAIN / LC_UNIXTHREAD
+		
+		MachOMainStub(VirtualMachine& vm, uint32_t entryPoint) 
+		: vm(vm), machOEntryPoint(entryPoint), StackSize(256 * 1024) {} // Tamanho padrão de stack
+		
+	public:
+		uint32_t StackSize;
+		
+		template<typename TArgumentIterator, typename TEnvironIterator>
+		MachOProgramControlHandle Instantiate(TArgumentIterator argBegin, TArgumentIterator argEnd, TEnvironIterator envBegin, TEnvironIterator envEnd)
+		{
+			return MachOProgramControlHandle(vm, StackSize, argBegin, argEnd, envBegin, envEnd);
+		}
+		
+		// Sobrecargas idênticas às originais para manter a compatibilidade com a assinatura da Main
+		uint32_t operator()(int argc, const char** argv) {
+			return operator()(argc, argv, nullptr);
+		}
+		
+		uint32_t operator()(int argc, const char** argv, const char** envp) {
+			return Instantiate(argv, argv + argc, envp, envp ? envp : nullptr).RunFromAddress(machOEntryPoint);
+		}
+	};
+
 }
 
 #endif /* defined(__Classix__VirtualMachine__) */
