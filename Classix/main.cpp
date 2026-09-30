@@ -303,23 +303,6 @@ static int run(const std::string& path, int argc, const char* argv[], const char
          std::cerr << "Error: Unexpected file format." << std::endl;
 		return -3; //Unknown error
 	}
-	char* directory = strdup(path.c_str());
-	char* executableName = directory;
-	for (char* iter = directory; *iter != 0; iter++)
-	{
-		if (*iter == '/')
-			executableName = iter;
-	}
-	*executableName = 0;
-	executableName++;
-	
-	chdir(directory);
-	std::string executable = executableName;
-	free(directory);
-	
-	// Starting guest program
-	auto stub = vm.LoadMainContainer(executable);
-	return stub(argc, argv, envp);
 }
 
 static int debugStub(uint16_t port, const std::string& path, int argc, const char** argv, const char* envp[])
