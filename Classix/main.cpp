@@ -245,6 +245,7 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	dlfcnResolver.RegisterLibrary("OpenTransportLib");
 	bundleResolver.AllowLibrary("CarbonLib");
 	bundleResolver.AllowLibrary("ControlStripLib");
+    bundleResolver.OverrideLibrary("InterfaceLib","CarbonLib");
 	
 	
 	vm.AddLibraryResolver(dlfcnResolver);
