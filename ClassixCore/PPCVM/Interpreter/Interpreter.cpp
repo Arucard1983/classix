@@ -73,6 +73,72 @@ namespace
 		BO_BRANCH_IF_TRUE		=  8, // 1
 		BO_DONT_CHECK_CONDITION	= 16, // 0
 	};
+	
+		// --- NOVA FUNÇÃO UNIVERSAL DA FFI ---
+	static void ExecuteMachOFFI_Universal(const MachO::NativeBridgeTarget& target, MachineState& state, Common::Allocator& allocator)
+	{
+		size_t numArgs = target.argTypes.size();
+		if (numArgs > 8) {
+			std::cerr << "[PPCVM FFI] Erro: Demasiados argumentos para a bridge atual." << std::endl;
+			return;
+		}
+
+		ffi_cif cif;
+		std::vector<ffi_type*> args(numArgs);
+		std::vector<void*> values(numArgs);
+
+		// Reservatórios temporários para reter os dados na stack do Host durante a chamada
+		std::vector<uint32_t> intStorage(numArgs, 0);
+		std::vector<void*> ptrStorage(numArgs, nullptr);
+		std::vector<double> floatStorage(numArgs, 0.0);
+
+		// Mapeamento sequencial dos registadores PowerPC G3 de entrada
+		uint32_t gprs[] = { state.r3, state.r4, state.r5, state.r6, state.r7, state.r8, state.r9, state.r10 };
+		double fprs[] = { state.f1, state.f2, state.f3, state.f4, state.f5, state.f6, state.f7, state.f8 };
+
+		size_t gprIndex = 0;
+		size_t fprIndex = 0;
+
+		for (size_t i = 0; i < numArgs; ++i) {
+			if (target.argTypes[i] == MachO::FFIType::Integer) {
+				intStorage[i] = gprs[gprIndex++];
+				args[i] = &ffi_type_uint32;
+				values[i] = &intStorage[i];
+			} 
+			else if (target.argTypes[i] == MachO::FFIType::Pointer) {
+				// Traduz o endereço virtual de 32 bits do emulador para o espaço nativo de 64 bits do Host
+				uint32_t guestAddr = gprs[gprIndex++];
+				ptrStorage[i] = (guestAddr == 0) ? nullptr : allocator.ToPointer(guestAddr);
+				args[i] = &ffi_type_pointer;
+				values[i] = &ptrStorage[i];
+			} 
+			else if (target.argTypes[i] == MachO::FFIType::Double) {
+				floatStorage[i] = fprs[fprIndex++];
+				args[i] = &ffi_type_double;
+				values[i] = &floatStorage[i];
+			}
+		}
+
+		// Determina o tipo de retorno esperado pela função nativa
+		ffi_type* returnFfiType = &ffi_type_uint32;
+		if (target.returnType == MachO::FFIType::Double) {
+			returnFfiType = &ffi_type_double;
+		}
+
+		if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, numArgs, returnFfiType, args.data()) == FFI_OK) {
+			if (target.returnType == MachO::FFIType::Double) {
+				double rc;
+				ffi_call(&cif, FFI_FN(target.functionPtr), &rc, values.data());
+				state.f1 = rc; // Convenção PPC: retornos decimais ficam em f1
+			} else {
+				uint32_t rc;
+				ffi_call(&cif, FFI_FN(target.functionPtr), &rc, values.data());
+				state.r3 = rc; // Convenção PPC: retornos padrão ficam em r3
+			}
+		} else {
+			std::cerr << "[PPCVM FFI] Erro crítico ao preparar CIF para: " << target.symbolName << std::endl;
+		}
+	}
 }
 
 namespace PPCVM
@@ -92,91 +158,6 @@ namespace PPCVM
 		{
 			return static_cast<const UInt32*>(*endAddress);
 		}
-
-     static void ExecuteMachOFFI_Integer(void* nativeFuncPtr, MachineState& state)
-        {
-            const size_t MAX_INT_ARGS = 8; 
-            ffi_cif cif;
-            ffi_type* args[MAX_INT_ARGS];
-            void* values[MAX_INT_ARGS];
-            
-            uint32_t ppcRegs[MAX_INT_ARGS] = {
-                state.r3, state.r4, state.r5, state.r6, state.r7, state.r8, state.r9, state.r10
-            };
-            
-            for (size_t i = 0; i < MAX_INT_ARGS; ++i) {
-                args[i] = &ffi_type_uint32;
-                values[i] = &ppcRegs[i];
-            }
-            
-            if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, MAX_INT_ARGS, &ffi_type_uint32, args) == FFI_OK) {
-                uint32_t rc;
-                ffi_call(&cif, FFI_FN(nativeFuncPtr), &rc, values);
-                state.r3 = rc; // Retorno padrão em r3
-            } else {
-                std::cerr << "[PPCVM FFI] Erro ao preparar CIF Inteira." << std::endl;
-            }
-        }
-
-        static void ExecuteMachOFFI_Float(void* nativeFuncPtr, MachineState& state)
-        {
-            const size_t MAX_FLOAT_ARGS = 4;
-            ffi_cif cif;
-            ffi_type* args[MAX_FLOAT_ARGS];
-            void* values[MAX_FLOAT_ARGS];
-            
-            double ppcFloats[MAX_FLOAT_ARGS] = {
-                state.f1, state.f2, state.f3, state.f4
-            };
-            
-            for (size_t i = 0; i < MAX_FLOAT_ARGS; ++i) {
-                args[i] = &ffi_type_double;
-                values[i] = &ppcFloats[i];
-            }
-            
-            if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, MAX_FLOAT_ARGS, &ffi_type_double, args) == FFI_OK) {
-                double rc;
-                ffi_call(&cif, FFI_FN(nativeFuncPtr), &rc, values);
-                state.f1 = rc; // Retorno de float padrão em f1
-            } else {
-                std::cerr << "[PPCVM FFI] Erro ao preparar CIF de Floating-Point." << std::endl;
-            }
-        }
-
-
-     static void ExecuteMachOFFI(void* nativeFuncPtr, MachineState& state)
-    {
-    // Para testes iniciais e funções POSIX padrão (como printf, open, write, etc.)
-    // Vamos assumir uma ABI genérica de até 6 argumentos numéricos/ponteiros.
-    // Dica: Para suporte total, idealmente lerás metadados da assinatura da função.
-    const size_t MAX_ARGS = 6; 
-    
-    ffi_cif cif;
-    ffi_type* args[MAX_ARGS];
-    void* values[MAX_ARGS];
-    
-    // Mapeia os registadores do G3 (r3 a r8) para os argumentos da FFI
-    uint32_t ppcRegs[MAX_ARGS] = {
-        state.r3, state.r4, state.r5, state.r6, state.r7, state.r8
-    };
-    
-    for (size_t i = 0; i < MAX_ARGS; ++i) {
-        args[i] = &ffi_type_uint32; // Em sistemas 32-bit (PPC Mac OS X), a maior parte é 32-bit
-        values[i] = &ppcRegs[i];
-    }
-    
-    // Configura a Interface de Função Externa (CIF) para retorno de 32-bit (int)
-    if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, MAX_ARGS, &ffi_type_uint32, args) == FFI_OK) {
-        uint32_t rc;
-        // Executa a chamada nativa no Host Intel!
-        ffi_call(&cif, FFI_FN(nativeFuncPtr), &rc, values);
-        
-        // Coloca o resultado de volta no registador de retorno padrão do PowerPC (r3)
-        state.r3 = rc;
-    } else {
-        std::cerr << "[PPCVM FFI] Erro crítico ao preparar CIF da libffi." << std::endl;
-    }
-   }
 
 
 		void Interpreter::Panic(const std::string& error)
@@ -217,12 +198,12 @@ namespace PPCVM
 			while (!branchAddress.compare_exchange_weak(expected, target))
 				expected = nullptr;
 		}
-		
-        const UInt32* Interpreter::ExecuteNative(const NativeCall* function)
+	
+	const UInt32* Interpreter::ExecuteNative(const NativeCall* function)
 		{
 			assert(function->Tag == NativeTag && "Invalid call header");
 			
-			// 1. O PULO DO GATO: Descobrir o endereço virtual do Guest onde este NativeTag reside
+			// 1. Descobrir o endereço virtual do Guest onde este NativeTag reside
 			uint32_t currentVirtualAddr = allocator.ToIntPtr(function);
 			
 			// 2. Verificar se este endereço pertence a um Stub gerado pelo nosso ambiente Mach-O
@@ -233,28 +214,18 @@ namespace PPCVM
 				if (getenv("DEBUG_DISASSEMBLE"))
 				{
 					std::cerr << "\t> [Mach-O Intel Bridge] Redirecionando stub 0x" 
-					          << std::hex << currentVirtualAddr 
-					          << (it->second.type == MachO::SymbolType::Float ? " (Float)" : " (Integer)")
-					          << " via libffi" << std::dec << std::endl;
+					          << std::hex << currentVirtualAddr << " (" << it->second.symbolName << ")"
+					          << " via libffi universal" << std::dec << std::endl;
 				}
 #endif
-				void* nativeIntelFunction = it->second.functionPtr;
+				// Executa a chamada FFI universal dinâmica e segura
+				ExecuteMachOFFI_Universal(it->second, state, allocator);
 				
-				// Desvia para a função FFI universal correta com base no tipo de símbolo
-				if (it->second.type == MachO::SymbolType::Float)
-				{
-					ExecuteMachOFFI_Float(nativeIntelFunction, state);
-				}
-				else
-				{
-					ExecuteMachOFFI_Integer(nativeIntelFunction, state);
-				}
-				
-				// Retorna o Link Register (LR) para o interpretador saber para onde voltar no código G3
+				// Retorna o Link Register (LR) para voltar ao fluxo do código principal G3
 				return allocator.ToPointer<UInt32>(state.lr);
 			}
 			
-			// 3. Fallback: Se não for um símbolo Mach-O, mantém o comportamento original do ClassiX (PEF/CFM)
+			// 3. Fallback: Se não for um símbolo Mach-O, mantém o comportamento original PEF/CFM
 #ifdef DEBUG_DISASSEMBLE
 			if (getenv("DEBUG_DISASSEMBLE"))
 			{
@@ -281,6 +252,8 @@ namespace PPCVM
 			function->Callback(libGlobals, &state);
 			return allocator.ToPointer<UInt32>(state.lr);
 		}
+
+        
 
 		void Interpreter::ExecuteUntilBranch(const UInt32* address)
 		{
