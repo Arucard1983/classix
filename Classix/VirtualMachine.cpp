@@ -22,6 +22,11 @@
 #include "VirtualMachine.h"
 #include <unordered_set>
 
+// --- VARIÁVEIS GLOBAIS DE SUPORTE AO AMBIENTE DE THREADS MACH-O ---
+Common::Allocator* g_macho_allocator = nullptr;
+OSEnvironment::Managers* g_macho_managers = nullptr;
+PPCVM::MachineState* g_macho_main_state = nullptr;
+
 namespace Classix
 {
 	uint32_t ProgramControlHandle::RunSymbol(CFM::ResolvedSymbol& symbol)
@@ -127,6 +132,20 @@ namespace Classix
 			envpEnd++;
 		
 		return this->operator()(argv, argv + argc, envp, envpEnd);
+	}
+	
+	uint32_t MachOMainStub::operator()(int argc, const char** argv, const char** envp) 
+	{
+		// 1. Instanciar o gestor de controlo e preparar a stack virtual do Mach-O
+		auto handle = Instantiate(argv, argv + argc, envp, envp ? envp : nullptr);
+
+		// 2. CAPTURA DE CONTEXTO: Inicializa as referências globais que o MachOThreadHelper vai herdar
+		g_macho_allocator  = &vm.allocator;
+		g_macho_managers   = &vm.managers;
+		g_macho_main_state = &vm.state;
+
+		// 3. Despoleta a execução concorrente através do Entry Point detetado pelo Loader
+		return handle.RunFromAddress(machOEntryPoint);
 	}
 	
 	VirtualMachine::VirtualMachine(Common::Allocator& allocator, OSEnvironment::Managers& managers)

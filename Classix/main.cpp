@@ -30,6 +30,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
+#include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -49,6 +50,7 @@
 #include "OStreamDisassemblyWriter.h"
 #include "DebugStub.h"
 #include "MachOContainer.h"
+#include "MachOLibraryResolver.h" // Incluído obrigatoriamente para fixar o tipo do Resolver
 
 const char endline = '\n';
 
@@ -75,13 +77,17 @@ static ExecutableType detectExecutableType(const std::string& path)
 	return ExecutableType::Unknown;
 }
 
-static char classChars[] = {
-	[PEF::SymbolClasses::CodeSymbol] = 'C',
-	[PEF::SymbolClasses::DataSymbol] = 'D',
-	[PEF::SymbolClasses::DirectData] = 'I',
-	[PEF::SymbolClasses::FunctionPointer] = 'F',
-	[PEF::SymbolClasses::GlueSymbol] = 'G'
-};
+// Correção do mapeamento do array associativo de classes para C++ standard
+static std::map<uint8_t, char> createClassChars() {
+	std::map<uint8_t, char> m;
+	m[PEF::SymbolClasses::CodeSymbol] = 'C';
+	m[PEF::SymbolClasses::DataSymbol] = 'D';
+	m[PEF::SymbolClasses::DirectData] = 'I';
+	m[PEF::SymbolClasses::FunctionPointer] = 'F';
+	m[PEF::SymbolClasses::GlueSymbol] = 'G';
+	return m;
+}
+static const std::map<uint8_t, char> classChars = createClassChars();
 
 
 static int listExports(const std::string& path)
@@ -107,7 +113,7 @@ static int listExports(const std::string& path)
 	{
 		const PEF::ExportedSymbol* symbol = exportTable.Find(*iter);
 		Export e = {
-			.type = classChars[symbol->Class],
+			.type = classChars.at(symbol->Class),
 			.name = symbol->SymbolName,
 			.begin = nullptr,
 			.end = nullptr
@@ -132,7 +138,6 @@ static int listExports(const std::string& path)
 		exports.push_back(e);
 	}
 	
-	// we only support dumping globals when there is just one data section
 	if (onlySection >= 0)
 	{
 		std::sort(exports.begin(), exports.end(), [](const Export& a, const Export& b) { return a.begin < b.begin; });
@@ -175,7 +180,7 @@ static int listImports(const std::string& path)
 	{
 		std::cout << libIter->Name << ':' << endline;
 		for (auto& symbol : libIter->Symbols)
-			std::cout << "  [" << classChars[symbol.Class] << "] " << symbol.Name << endline;
+			std::cout << "  [" << classChars.at(symbol.Class) << "] " << symbol.Name << endline;
 		std::cout << endline;
 	}
 	return 0;
@@ -234,47 +239,45 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 	ClassixCore::BundleLibraryResolver bundleResolver(allocator, managers);
 	
 	if (exeType == ExecutableType::PEF) {
-	
-	std::cout << "[ClassiX] Starting PEF Environment for Classic Programs..." << std::endl;
+		std::cout << "[ClassiX] Starting PEF Environment for Classic Programs..." << std::endl;
+			
+		dlfcnResolver.RegisterLibrary("StdCLib");
+		dlfcnResolver.RegisterLibrary("MathLib");
+		dlfcnResolver.RegisterLibrary("ThreadsLib");
+		dlfcnResolver.RegisterLibrary("OpenTransportLib");
+		bundleResolver.AllowLibrary("CarbonLib");
+		bundleResolver.AllowLibrary("ControlStripLib");
+		bundleResolver.OverrideLibrary("InterfaceLib","CarbonLib");
 		
-	dlfcnResolver.RegisterLibrary("StdCLib");
-	dlfcnResolver.RegisterLibrary("MathLib");
-	dlfcnResolver.RegisterLibrary("ThreadsLib");
-	dlfcnResolver.RegisterLibrary("OpenTransportLib");
-	bundleResolver.AllowLibrary("CarbonLib");
-	bundleResolver.AllowLibrary("ControlStripLib");
-    bundleResolver.OverrideLibrary("InterfaceLib","CarbonLib");
-	
-	vm.AddLibraryResolver(dlfcnResolver);
-	vm.AddLibraryResolver(bundleResolver);
-	vm.AddLibraryResolver(dummyResolver);
+		vm.AddLibraryResolver(dlfcnResolver);
+		vm.AddLibraryResolver(bundleResolver);
+		vm.AddLibraryResolver(dummyResolver);
 
-	char* directory = strdup(path.c_str());
-	char* executableName = directory;
-	for (char* iter = directory; *iter != 0; iter++)
-	{
-		if (*iter == '/')
-			executableName = iter;
-	}
-	*executableName = 0;
-	executableName++;
-	
-	chdir(directory);
-	std::string executable = executableName;
-	free(directory);
-	
-	// Starting guest program
-	auto stub = vm.LoadMainContainer(executable);
-	return stub(argc, argv, envp);
-	
+		char* directory = strdup(path.c_str());
+		char* executableName = directory;
+		for (char* iter = directory; *iter != 0; iter++)
+		{
+			if (*iter == '/')
+				executableName = iter;
+		}
+		*executableName = 0;
+		executableName++;
+		
+		chdir(directory);
+		std::string executable = executableName;
+		free(directory);
+		
+		auto stub = vm.LoadMainContainer(executable);
+		return stub(argc, argv, envp);
 	}
 	else if (exeType == ExecutableType::MachO_32) {
 		std::cout << "[ClassiX] Starting Mach-O PPC Environment..." << std::endl;
-		// Create the Environmrnt for Mach-O programs.
-        auto machoEnv = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
-        vm.AddLibraryResolver(machoEnv);
 		
-	    //Starting the Mach-O program
+		// FIX DE MEMÓRIA: Instanciamos e passamos a propriedade do objeto diretamente para a VM 
+		// ou seguramo-lo na pilha local para durar enquanto o 'stub' estiver em execução concorrente.
+		auto machoEnv = std::make_unique<MachO::MachOLibraryResolver>(allocator, managers);
+		vm.AddLibraryResolver(*machoEnv); // Registado em segurança por referência estável
+		
 		std::string directory = ".";
 		std::string executable = path;
 		size_t lastSlash = path.find_last_of('/');
@@ -288,19 +291,18 @@ static int run(const std::string& path, int argc, const char* argv[], const char
 			std::cerr << "[ClassiX] Warning: Could not change directory to " << directory << std::endl;
 		}
 	
-	       // Starting guest program
-	      auto stub = vm.LoadMachOContainer(executable); //mach-O uses a different foundation!
-	      return stub(argc, argv, reinterpret_cast<const char**>(envp));
+		// Lança o binário Mach-O preservando os metadados do resolver ativos no Host
+		auto stub = vm.LoadMachOContainer(executable);
+		return stub(argc, argv, envp);
 	}
 	else if (exeType == ExecutableType::MachO_64) {
 		std::cerr << "[ClassiX] Power PC G5 (64-bit) binary detected!" << std::endl;
 		std::cerr << "ClassiX and Carbon framework under Darling environment only support 32-bit PPC." << std::endl;
-		return -3; // No guest 64-bit support
+		return -3; 
 	}
-    else
-    {
-         std::cerr << "Error: Unexpected file format." << std::endl;
-		return -3; //Unknown error
+	else {
+		std::cerr << "Error: Unexpected file format." << std::endl;
+		return -3;
 	}
 }
 
