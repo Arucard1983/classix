@@ -197,9 +197,9 @@ namespace ClassixCore
 		  }  
 	     }
 		// 3. Follow the rest as the old code
-		if (allowedBundles.find(name) != allowedBundles.end())
+		if (allowedBundles.find(targetName) != allowedBundles.end())
 		{
-			auto iter = allBundles.find(name);
+			auto iter = allBundles.find(targetName);
 			if (iter != allBundles.end())
 			{
 				loadedLibraries.emplace_back(iter->second);
