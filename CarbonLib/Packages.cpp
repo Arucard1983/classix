@@ -24,11 +24,11 @@
 
 void CarbonLib_InitAllPacks(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	//no-op. Obsolete
 }
 
 void CarbonLib_InitPack(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	//no-op. Obsolete
 }
 
