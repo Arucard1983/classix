@@ -22,54 +22,54 @@
 #include <chrono>
 #include "CarbonLib.h"
 #include "Prototypes.h"
-#include "NotImplementedException.h"
+#include "BigEndian.h"
 
 using namespace std::chrono;
 
 void CarbonLib_InstallTimeTask(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3 = 0;
 }
 
 void CarbonLib_InstallXTimeTask(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3 = 0;
 }
 
 void CarbonLib_InsTime(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3 = 0;
 }
 
 void CarbonLib_InsXTime(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3 = 0;
 }
 
 void CarbonLib_Microseconds(CarbonLib::Globals* globals, MachineState* state)
 {
-	auto duration = high_resolution_clock::now().time_since_epoch();
-	long long micros = duration_cast<microseconds>(duration).count();
-	*globals->allocator.ToPointer<Common::UInt32>(state->r3) = static_cast<uint32_t>(micros);
+	 auto duration = high_resolution_clock::now().time_since_epoch();
+    uint64_t micros = duration_cast<microseconds>(duration).count(); 
+	*globals->allocator.ToPointer<Common::UInt64>(state->r3) = micros;
 }
 
 void CarbonLib_PrimeTime(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3 = 0;
 }
 
 void CarbonLib_PrimeTimeTask(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3 = 0;
 }
 
 void CarbonLib_RemoveTimeTask(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3 = 0;
 }
 
 void CarbonLib_RmvTime(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3 = 0;
 }
 
