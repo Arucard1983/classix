@@ -235,6 +235,7 @@ static SEL ipcSelectors[] = {
 	IPC_INDEX(MenuSelect) = @selector(menuSelect),
 	IPC_INDEX(MenuKey) = @selector(menuKey),
 	IPC_INDEX(PromptColorPicker) = @selector(promptColorPicker),
+	IPC_INDEX(DisplayFatalAlert) = @selector(displayFatalAlert),
 };
 
 const size_t ipcSelectorCount = sizeof ipcSelectors / sizeof(SEL);
@@ -992,6 +993,25 @@ const size_t ipcSelectorCount = sizeof ipcSelectors / sizeof(SEL);
 	channel->Write(outB);
 	
 	// send the confirmation expected by the emulator
+	[self sendDone:_cmd];
+}
+
+-(void)displayFatalAlert 
+{
+	IPC_PARAM(message, std::string);
+	[self expectDone];
+
+	NSString* nsMessage = [NSString stringWithCString:message.c_str() encoding:NSMacOSRomanStringEncoding];
+
+	NSAlert *alert = [[NSAlert alloc] init];
+	[alert setMessageText:@"Mac OS System Panic"];
+	[alert setInformativeText:nsMessage];
+	[alert setAlertStyle:NSAlertStyleCritical];
+	[alert addButtonWithTitle:@"Close Application"];
+	
+	// Pause to dispaly on Darling the Error
+	[alert runModal];
+	
 	[self sendDone:_cmd];
 }
 
