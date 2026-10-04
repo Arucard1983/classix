@@ -26,36 +26,41 @@
 
 void CarbonLib_SysError(InterfaceLib::Globals* globals, MachineState* state)
 {
-	// Fatal error that on classic Mac OS simply frozen the system!
 	int16_t errorID = static_cast<int16_t>(state->r3);
+	std::string errorDesc;
 
-	std::cerr << "\n==================================================" << std::endl;
-	std::cerr << "   FATAL: MAC OS SYSTEM PANIC (SysError / Bomb)   " << std::endl;
-	std::cerr << "==================================================" << std::endl;
-	std::cerr << "Program thrown SysError with ID: " << errorID << std::endl;
-	
-	// Tradução rápida dos códigos de bomba mais famosos do Mac OS
+	// Tradução rápida dos códigos de bomba clássicos
 	switch (errorID) {
-		case 1:  std::cerr << "Description: Bus Error (Invalid Memory Access)" << std::endl; break;
-		case 2:  std::cerr << "Description: Address Error (Invalid Memory Adress)" << std::endl; break;
-		case 3:  std::cerr << "Description: Illegal Instruction (Invalid PPC Instruction)" << std::endl; break;
-		case 4:  std::cerr << "Description: Zero Divide (Numerical Exception)" << std::endl; break;
-		case 9:  std::cerr << "Description: Line 1010 Trap (Application tryed to use A-Trap, which is not supported)" << std::endl; break;
-		case 25: std::cerr << "Description: Memory Manager Error (Corrupted Memory Heap)" << std::endl; break;
-		case 28: std::cerr << "Description: Stack Overflow (Stack Overflow Heap)" << std::endl; break;
-		default: std::cerr << "Description: Unknown System Error." << std::endl; break;
+		case 1:  errorDesc = "Bus Error (Acesso inválido à memória)"; break;
+		case 2:  errorDesc = "Address Error (Alinhamento de endereço inválido)"; break;
+		case 3:  errorDesc = "Illegal Instruction (Instrução PPC inválida)"; break;
+		case 4:  errorDesc = "Zero Divide (Exceção numérica)"; break;
+		case 9:  errorDesc = "Line 1010 Trap (Tentativa ilegal de usar A-Trap 68k)"; break;
+		case 25: errorDesc = "Memory Manager Error (Heap de memória corrompido)"; break;
+		case 28: errorDesc = "Stack Overflow (Estouro da pilha de execução)"; break;
+		default: errorDesc = "Erro de Sistema Desconhecido."; break;
 	}
 
-	// Machine State Dump for Darling debug
-	std::cerr << "\n--- PPC REGISTERS AT FAILURE MOMENT ---" << std::endl;
-	std::cerr << "PC:  0x" << std::hex << std::setw(8) << std::setfill('0') << state->pc << std::endl;
-	std::cerr << "R3:  0x" << std::hex << std::setw(8) << std::setfill('0') << state->r3 << "  |  R4:  0x" << state->r4 << std::endl;
-	std::cerr << "R1 (SP): 0x" << std::hex << std::setw(8) << std::setfill('0') << state->r1 << std::endl;
-	
-	std::cerr << "==================================================\n" << std::endl;
+	// Criar a mensagem de texto estruturada que vai ser enviada para a UI Cocoa
+	std::stringstream uiMessage;
+	uiMessage << "O emulador ClassiC detetou um System Panic (Bomba Mac OS)\n\n"
+	          << "ID do Erro: " << errorID << "\n"
+	          << "Descrição: " << errorDesc << "\n\n"
+	          << "A aplicação será encerrada para proteger o estado do host.";
 
-        // Controlled exiting
-	globals->ipc().PerformAction<void>(IPCMessage::TerminateApplication);
+	// Fazer o dump detalhado no terminal para o programador (Darling debug)
+	std::cerr << "\n*** MAC OS SYSTEM PANIC (SysError " << errorID << ") ***" << std::endl;
+	std::cerr << errorDesc << std::endl;
+	// Nota: Substitui o 'state->pc' pelo registo de programa correto do teu emulador
+	// state->lr costuma ser útil aqui para saber quem chamou a função com falha
+	std::cerr << "LR (Link Register): 0x" << std::hex << state->lr << std::endl; 
+
+	// ENGENHARIA SURREAL: Disparar uma mensagem IPC para o Cocoa/Darling abrir um popup nativo!
+	// Assumindo que adicionas uma mensagem 'IPCMessage::DisplayFatalAlert' ao teu enum
+	globals->uiChannel->PerformAction<void>(CarbonLib::IPCMessage::DisplayFatalAlert, uiMessage.str());
+
+	// Terminar a aplicação de forma limpa pelo canal IPC do Félix
+	globals->uiChannel->PerformAction<void>(CarbonLib::IPCMessage::TerminateApplication);
 	std::exit(EXIT_FAILURE);
 }
 
