@@ -440,6 +440,8 @@ namespace CarbonLib
 		MenuSelect,
 		MenuKey,
 		CheckItem,
+		
+		PromptColorPicker,
 	};
 }
 
