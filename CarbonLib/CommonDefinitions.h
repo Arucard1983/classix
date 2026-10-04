@@ -442,6 +442,7 @@ namespace CarbonLib
 		CheckItem,
 		
 		PromptColorPicker,
+		DisplayFatalAlert, 
 	};
 }
 
