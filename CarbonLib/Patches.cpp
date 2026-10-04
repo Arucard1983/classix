@@ -22,50 +22,57 @@
 
 
 #include "Prototypes.h"
-#include "NotSupportedException.h"
+
+//Implement dummy traps to certain OS 9 programs could work
+constexpr uint32_t kDummyTrapAddress = 0xBAD0TRAP;
 
 void CarbonLib_GetOSTrapAddress(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	state->r3 = kDummyTrapAddress;
 }
 
 void CarbonLib_GetToolboxTrapAddress(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	state->r3 = kDummyTrapAddress;
 }
 
 void CarbonLib_GetToolTrapAddress(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	state->r3 = kDummyTrapAddress;
 }
 
 void CarbonLib_GetTrapVector(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	state->r3 = kDummyTrapAddress;
 }
 
 void CarbonLib_NGetTrapAddress(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	uint16_t trapNum = static_cast<uint16_t>(state->r3);
+	state->r3 = kDummyTrapAddress;
 }
 
 void CarbonLib_NSetTrapAddress(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	state->r3 = 9;
+	CarbonLib_SysError(globals,state);
 }
 
 void CarbonLib_SetOSTrapAddress(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	state->r3 = 9;
+	CarbonLib_SysError(globals,state);
 }
 
 void CarbonLib_SetToolboxTrapAddress(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	state->r3 = 9;
+	CarbonLib_SysError(globals,state);
 }
 
 void CarbonLib_SetToolTrapAddress(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotSupportedException(__func__, "Traps is a legacy feature of 68k and unsafe, therefore is not supported!");
+	state->r3 = 9;
+	CarbonLib_SysError(globals,state);
 }
 
