@@ -98,4 +98,7 @@
 // Open the select color panel
 -(void)promptColorPicker;
 
+// Display a fatal message
+-(void)displayFatalAlert;
+
 @end
