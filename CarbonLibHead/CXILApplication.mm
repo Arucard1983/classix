@@ -234,6 +234,7 @@ static SEL ipcSelectors[] = {
 	IPC_INDEX(CheckItem) = @selector(checkMenuItem),
 	IPC_INDEX(MenuSelect) = @selector(menuSelect),
 	IPC_INDEX(MenuKey) = @selector(menuKey),
+	IPC_INDEX(PromptColorPicker) = @selector(promptColorPicker),
 };
 
 const size_t ipcSelectorCount = sizeof ipcSelectors / sizeof(SEL);
@@ -935,6 +936,62 @@ const size_t ipcSelectorCount = sizeof ipcSelectors / sizeof(SEL);
 	NSEvent* keyEvent = [NSEvent keyEventWithType:NSKeyDown location:location modifierFlags:NSCommandKeyMask timestamp:now windowNumber:frontWindow context:nullptr characters:characters charactersIgnoringModifiers:characters isARepeat:NO keyCode:keyCode];
 	[self.mainMenu performKeyEquivalent:keyEvent];
 	
+	[self sendDone:_cmd];
+}
+
+-(void)promptColorPicker
+{
+	// 1. Extracting the pipe parameters
+	IPC_PARAM(prompt, std::string);
+	IPC_PARAM(inR, uint16_t);
+	IPC_PARAM(inG, uint16_t);
+	IPC_PARAM(inB, uint16_t);
+	[self expectDone]; // Validates the sync token given by the emulator
+	
+	// 2. Convert the Roman MacOs strong to native NSString
+	NSString* nsPrompt = [NSString stringWithCString:prompt.c_str() encoding:NSMacOSRomanStringEncoding];
+	
+	// 3. Setup the native modal dialog
+	NSAlert* alert = [[NSAlert alloc] init];
+	[alert setMessageText:nsPrompt];
+	[alert addButtonWithTitle:@"OK"];
+	[alert addButtonWithTitle:@"Cancel"];
+	
+	// Convert the Classic colors (0-65535) to Coacoa's CGFloat (0.0-1.0)
+	NSColor* initialColor = [NSColor colorWithCalibratedRed:(CGFloat)inR / 65535.0
+                                                     green:(CGFloat)inG / 65535.0
+                                                      blue:(CGFloat)inB / 65535.0
+                                                     alpha:1.0];
+	
+	// Setup the visual setting of the color selection
+	NSColorWell* colorWell = [[NSColorWell alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
+	[colorWell setColor:initialColor];
+	[alert setAccessoryView:colorWell];
+	
+	// 4. Run the papel (pause the graphical process and the emulator until the user chooses)
+	NSInteger buttonPressed = [alert runModal];
+	
+	uint32_t accepted = (buttonPressed == NSAlertFirstButtonReturn) ? 1 : 0;
+	uint16_t outR = inR;
+	uint16_t outG = inG;
+	uint16_t outB = inB;
+	
+	if (accepted)
+	{
+		// Select the color and convert to the RGB space of macOS
+		NSColor* selectedColor = [[colorWell color] colorUsingColorSpace:[NSColorSpace calibratedRGBColorSpace]];
+		outR = static_cast<uint16_t>([selectedColor redComponent] * 65535.0);
+		outG = static_cast<uint16_t>([selectedColor greenComponent] * 65535.0);
+		outB = static_cast<uint16_t>([selectedColor blueComponent] * 65535.0);
+	}
+	
+	// 5. Return the serialized variables to the emulator
+	channel->Write(accepted);
+	channel->Write(outR);
+	channel->Write(outG);
+	channel->Write(outB);
+	
+	// send the confirmation expected by the emulator
 	[self sendDone:_cmd];
 }
 

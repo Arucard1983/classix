@@ -95,4 +95,7 @@
 // finds a menu by its key equivalent
 -(void)menuKey;
 
+// Open the select color panel
+-(void)promptColorPicker;
+
 @end
