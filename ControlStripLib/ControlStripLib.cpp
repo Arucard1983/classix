@@ -73,25 +73,31 @@ extern "C"
 	void ControlStripLib_SBGetBarGraphWidth(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// short SBGetBarGraphWidth(short barCount);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBTrackPopupMenu(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// short SBTrackPopupMenu(const Rect* moduleRect, MenuRef menu);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBIsShowHideHotKeyEnabled(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBIsShowHideHotKeyEnabled(Boolean* enabled);
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t enabledAddress = state->r3;
+		if (globals->allocator.IsValidAddress(enabledAddress, sizeof(uint8_t)))
+		{
+			uint8_t* enabled = globals->allocator.ToPointer<uint8_t>(enabledAddress);
+			*enabled = 0; // false
+		}
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBSavePreferences(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBSavePreferences(ConstStr255Param prefResourceName, Handle preferences);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBIsControlStripVisible(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
@@ -108,102 +114,114 @@ extern "C"
 	void ControlStripLib_SBShowHelpString(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBShowHelpString(const Rect* moduleRect, StringPtr helpString);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBModalDialogInContext(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// void SBModalDialogInContext(ModalFilterUPP filterProc, short* itemHit);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBGetDetachedIndString(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// void SBGetDetachedIndString(StringPtr theString, Handle stringList, short whichString);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBSetControlStripFontID(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBSetControlStripFontID(short fontID);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBGetShowHideHotKey(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBGetShowHideHotKey(short* modifiers, unsigned char* keyCodes);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBShowHideControlStrip(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// void SBShowHideControlStrip(Boolean showIt);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBTrackSlider(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// short SBTrackSlider(const Rect* moduleRect, short ticksOnSlider, short initialValue);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = state->r5;
 	}
 	
 	void ControlStripLib_SBSetShowHideHotKey(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBSetShowHideHotKey(short modifiers, unsigned char keyCode);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBGetControlStripFontSize(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBGetControlStripFontSize(short* fontSize);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBOpenModuleResourceFile(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// short SBOpenModuleResourceFile(OSType fileCreator);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = -1;
 	}
 	
 	void ControlStripLib_SBGetDetachIconSuite(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBGetDetachIconSuite(Handle* theIconSuite, short theResID, unsigned long selector);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBHitTrackSlider(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// short SBHitTrackSlider(const Rect* moduleRect, short ticksOnSlider, short initialValue, Boolean* hit);
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t hitAddr = state->r6;
+		if (globals->allocator.IsValidAddress(hitAddr, sizeof(uint8_t)))
+		{
+			uint8_t* hit = globals->allocator.ToPointer<uint8_t>(hitAddr);
+			*hit = 0; // Not clicked
+		}
+		state->r3 = state->r5;
 	}
 	
 	void ControlStripLib_SBDrawBarGraph(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// void SBDrawBarGraph(short level, short barCount, short direction, Point barGraphTopLeft);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBGetControlStripFontID(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBGetControlStripFontID(short* fontId);
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t fontIdAddr = state->r3;
+		if (globals->allocator.IsValidAddress(fontIdAddr, sizeof(int16_t)))
+		{
+			int16_t* fontId = globals->allocator.ToPointer<int16_t>(fontIdAddr);
+			*fontId = 0; // Chicago / System Font default
+		}
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBSafeToAccessStartupDisk(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// Boolean SBSafeToAccessStartupDisk();
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 1;
 	}
 	
 	void ControlStripLib_SBLoadPreferences(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBLoadPreferences(ConstStr255Param perfResourceName, Handle* preferences);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBSetControlStripFontSize(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBSetControlStripFontSize(short fontSize);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 }
