@@ -24,7 +24,7 @@
 #include <cstdlib>
 #include "Prototypes.h"
 
-void CarbonLib_SysError(InterfaceLib::Globals* globals, MachineState* state)
+void CarbonLib_SysError(CarbonLib::Globals* globals, MachineState* state)
 {
 	int16_t errorID = static_cast<int16_t>(state->r3);
 	std::string errorDesc;
