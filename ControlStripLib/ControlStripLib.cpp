@@ -108,7 +108,7 @@ extern "C"
 	void ControlStripLib_SBEnableShowHideHotKey(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
 	{
 		// OSErr SBEnableShowHideHotKey(Boolean enabled);
-		throw PPCVM::NotImplementedException(__func__);
+		state->r3 = 0;
 	}
 	
 	void ControlStripLib_SBShowHelpString(ControlStripLib::Globals* globals, PPCVM::MachineState* state)
