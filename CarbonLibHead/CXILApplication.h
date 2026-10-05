@@ -101,4 +101,7 @@
 // Display a fatal message
 -(void)displayFatalAlert;
 
+// Display a info message
+-(void)displayInformation;
+
 @end
