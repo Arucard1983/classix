@@ -24,11 +24,11 @@
 
 void CarbonLib_NMInstall(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3=0;
 }
 
 void CarbonLib_NMRemove(CarbonLib::Globals* globals, MachineState* state)
 {
-	throw PPCVM::NotImplementedException(__func__);
+	state->r3=0;
 }
 
