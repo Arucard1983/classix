@@ -236,6 +236,7 @@ static SEL ipcSelectors[] = {
 	IPC_INDEX(MenuKey) = @selector(menuKey),
 	IPC_INDEX(PromptColorPicker) = @selector(promptColorPicker),
 	IPC_INDEX(DisplayFatalAlert) = @selector(displayFatalAlert),
+	IPC_INDEX(DisplayInformation) = @selector(displayInformation),
 };
 
 const size_t ipcSelectorCount = sizeof ipcSelectors / sizeof(SEL);
@@ -994,6 +995,32 @@ const size_t ipcSelectorCount = sizeof ipcSelectors / sizeof(SEL);
 	
 	// send the confirmation expected by the emulator
 	[self sendDone:_cmd];
+}
+
+- (void)displayInformation
+{
+    // Retrieve the parameters given using IPC by the emulator
+    IPC_PARAM(message, std::string);
+    [self expectDone];
+
+    // Convert the original string using MacOS Roman encoding
+    NSString* nsMessage = [NSString stringWithCString:message.c_str() encoding:NSMacOSRomanStringEncoding];
+
+    // Create the Darling native Alert panel
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:@"Mac OS Classic System Notification"];
+    [alert setInformativeText:nsMessage];
+    [alert setAlertStyle:NSAlertStyleInformational]; // Info alert.
+    [alert addButtonWithTitle:@"OK"]; // Default button to close the panel
+    
+    // Make Darling send a notification alert to the host (ex: KDE notification)
+    [[NSApplication sharedApplication] requestUserAttention:NSInformationalRequest];
+    
+    // Stop the execution until the user click OK
+    [alert runModal];
+    
+    // Return the control
+    [self sendDone:_cmd];
 }
 
 -(void)displayFatalAlert 
