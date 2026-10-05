@@ -443,6 +443,7 @@ namespace CarbonLib
 		
 		PromptColorPicker,
 		DisplayFatalAlert, 
+		DisplayInformation,
 	};
 }
 
