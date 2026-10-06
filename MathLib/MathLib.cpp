@@ -690,17 +690,18 @@ extern "C"
 	}
 	
 	void MathLib_feclearexcept(Globals* globals, MachineState* state)
-	{
-		// O r3 contains the flags to clean up (ex: VX, OX, UX, ZX, XX)
-                uint32_t excepts = state->r3;
-                // Clear the flags
-                if (excepts & (1 << 0)) state->fpscr.VX = 0; // Invalid Operation Summary
-                if (excepts & (1 << 1)) state->fpscr.OX = 0; // Overflow
-                if (excepts & (1 << 2)) state->fpscr.UX = 0; // Underflow
-                if (excepts & (1 << 3)) state->fpscr.ZX = 0; // Zero Divide
-                if (excepts & (1 << 4)) state->fpscr.XX = 0; // Inexact
-                state->r3 = 0; // Done
-	}
+        {
+          uint32_t excepts = state->r3;
+    
+    // Limpeza direta dos bits de exceção do PowerPC no campo hex global
+    if (excepts & (1 << 0)) state->fpscr.hex &= ~(1 << 27); // Mapeamento correto do bit VX
+    if (excepts & (1 << 1)) state->fpscr.hex &= ~(1 << 26); // OX
+    if (excepts & (1 << 2)) state->fpscr.hex &= ~(1 << 25); // UX
+    if (excepts & (1 << 3)) state->fpscr.hex &= ~(1 << 24); // ZX
+    if (excepts & (1 << 4)) state->fpscr.hex &= ~(1 << 23); // XX
+    
+         state->r3 = 0;
+         }
 	
 	void MathLib_fegetenv(Globals* globals, MachineState* state)
 	{
@@ -1188,7 +1189,7 @@ extern "C"
     *seedPtr = nextSeed;
 
     // Devolve o número pseudo-aleatório gerado no registo flutuante r1
-    state->fpr = nextSeed;
+    state->fpr[1] = nextSeed;
 	}
 	
 	void MathLib_relation(Globals* globals, MachineState* state)
@@ -1290,7 +1291,7 @@ extern "C"
 	void MathLib_roundtol(Globals* globals, MachineState* state)
 	{
 		// std::round arredonda para longe de zero em casos de .5, ignorando o fenv corrente
-    double rounded = std::round(state->fpr);
+                double rounded = std::round(state->fpr[1]);
     
     // Devolve o inteiro de 32-bits com sinal no registo r3
     state->r3 = static_cast<int32_t>(rounded);
@@ -1298,7 +1299,7 @@ extern "C"
 	
 	void MathLib_roundtoll(Globals* globals, MachineState* state)
 	{
-		double rounded = std::round(state->fpr);
+		double rounded = std::round(state->fpr[1]);
     int64_t result64 = static_cast<int64_t>(rounded);
     
     // Convenção estrita de chamadas PowerPC de 32-bits para retornos de 64-bits:
@@ -1509,31 +1510,43 @@ extern "C"
 	}
 	
 	void MathLib_x80tod(Globals* globals, MachineState* state)
-	{
-		// r3 cointain the extended80 pointer on emulated memory
-                // r4 contain the target pointer (64 bits) on emulated memoty
-                extended80* src = globals->allocator.ToPointer<extended80>(state->r3);
-                Common::Real64* dst = globals->allocator.ToPointer<Common::Real64>(state->r4);
+        {
+         extended80* src = globals->allocator.ToPointer<extended80>(state->r3);
+         Common::Real64* dst = globals->allocator.ToPointer<Common::Real64>(state->r4);
 
-          if (src && dst)
-          {
-            // Local buffer for x86_64 80-bits
-            long double localHostLD = 0.0;
-              uint8_t* hostBytes = reinterpret_cast<uint8_t*>(&localHostLD);
+         if (src && dst)
+        {
+        // Extração explícita de bits baseada no layout SANE (1 bit sinal, 15 bits expoente, 64 bits mantissa)
+        uint8_t sign = (src->bytes[0] & 0x80) >> 7;
+        uint16_t exp = ((static_cast<uint16_t>(src->bytes[0] & 0x7F)) << 8) | src->bytes[1];
+        
+        uint64_t mantissa = 0;
+        for (int i = 0; i < 8; ++i)
+        {
+            mantissa |= (static_cast<uint64_t>(src->bytes[2 + i]) << (56 - (i * 8)));
+        }
 
-            // Inverting 10-bit Big-Endian (Mac) to Little-Endian (Host x86_64)
-            for (int i = 0; i < 10; ++i)
-            {
-             hostBytes[i] = src->bytes[9 - i];
-            }
+        // Casos Especiais SANE
+        if (exp == 0 && mantissa == 0)
+        {
+            *dst = sign ? -0.0 : 0.0;
+            return;
+        }
+        if (exp == 0x7FFF)
+        {
+            // Infinito ou NaN (SANE define o bit mais significativo da mantissa para Quiet/Signaling)
+            *dst = (mantissa & 0x4000000000000000ull) ? std::numeric_limits<double>::quiet_NaN() : std::numeric_limits<double>::infinity();
+            if (sign) *dst = -(*dst);
+            return;
+        }
 
-        // Convert the 80-bits long double from host to native double (64 bits)
-        double resultDouble = static_cast<double>(localHostLD);
+        // Reconstrução matemática do Double (IEEE 754 de 64-bits) independente da CPU do host
+        double result = static_cast<double>(mantissa) * std::pow(2.0, static_cast<int>(exp) - 16383 - 63);
+        if (sign) result = -result;
 
-        // Sign operator from Common::Real64 handle the rest
-        *dst = resultDouble;
-          }
-	}
+        *dst = result;
+         }
+        }
 	
 	void MathLib_x80told(Globals* globals, MachineState* state)
 	{
