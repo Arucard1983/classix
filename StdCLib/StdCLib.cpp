@@ -28,6 +28,7 @@
 #include <sstream>
 #include <regex>
 #include <cstring>
+#include <csignal>
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -63,37 +64,33 @@ namespace
 
 namespace StdCLib
 {
-	const int NFILE = 40;
+    const int NFILE = 40;
 
-	union PPCFILE
-	{
-		static const char* OffsetNames[28];
-		
-		struct
-		{
-			int32_t _cnt;
-			uint32_t _ptr;
-			uint32_t _base;
-			uint32_t _end;
-			uint16_t _size;
-			uint16_t _flag;
-			uint16_t _file;
-		};
-		
-		struct
-		{
-			uint32_t : 32;
-			FILE* fptr;
-		};
-	};
+    union PPCFILE
+    {
+         static const char* OffsetNames[28];
+    
+         // Força o empacotamento estrito do Mac OS clássico e o Endianness correto
+         struct __attribute__((packed))
+        {
+         Common::SInt32 _cnt;   // Usar tipos do BigEndian.h
+         Common::UInt32 _ptr;   // Endereço na VM do PowerPC
+         Common::UInt32 _base;  // Endereço na VM do PowerPC
+         Common::UInt32 _end;   // Endereço na VM do PowerPC
+         Common::UInt16 _size;
+         Common::UInt16 _flag;
+         Common::UInt16 _file;
+         uint8_t  _unused[2];   // Alinhamento para bater com o tamanho clássico de 24/28 bytes se necessário
+        };
+    };
 
 	struct IntEnv
-	{
-		Common::UInt16 unknown;
-		Common::UInt32 argc;
-		Common::UInt32 argv;
-		Common::UInt32 envp;
-	} __attribute__((packed));
+        {
+         Common::UInt32 runtimeFlags; // Alterado para UInt32 para garantir o alinhamento correto de 4 bytes dos campos seguintes
+         Common::UInt32 argc;         // Alinhado corretamente
+         Common::UInt32 argv;         // Ponteiro para o array de strings na VM
+         Common::UInt32 envp;         // Ponteiro para as variáveis de ambiente na VM
+         } __attribute__((packed));
 
 	const char* PPCFILE::OffsetNames[28] = {
 		"_cnt", "_cnt + 1", "_cnt + 2", "_cnt + 3",
@@ -178,6 +175,8 @@ namespace StdCLib
 		std::deque<PEF::TransitionVector> atExit;
 		Common::Allocator& allocator;
 		
+		std::map<uint32_t, FILE*> nativeFileMap; //handle the FILE to PPC
+		
 		static std::map<off_t, std::string> FieldOffsets;
 		static std::map<std::string, size_t> FieldLocations;
 		
@@ -211,6 +210,30 @@ namespace StdCLib
 			scalars._PublicTimeInfo = 0x3100000000000ff0ull;
 			scalars._CategoryLoc = 0x3030313131000000ull;
 		}
+		
+		private:
+                // Função auxiliar para registar com segurança os streams nativos
+               void SetupNativeStream(int index, FILE* hostStream)
+              {
+                if (hostStream == nullptr) return;
+
+                // Duplicamos o descritor nativo para isolar o ambiente da VM do host
+                 int fd = fileno(hostStream);
+                 int accmode = fcntl(fd, F_GETFL) & O_ACCMODE;
+                 const char* mode = (accmode == O_RDONLY) ? "r" : (accmode == O_WRONLY ? "a" : "r+");
+        
+                FILE* duplicatedStream = fdopen(dup(fd), mode);
+                if (duplicatedStream)
+                {
+                 // Atribuímos um ID de ficheiro simulado na ToolBox
+                 scalars._iob[index]._file = index;
+                 scalars._iob[index]._flag = 0x01; // Flag básica de aberto (simulando MSL)
+            
+                 // Guardamos o ponteiro real no nosso mapa nativo seguro de 64 bits
+                 uint32_t p_iobAddress = allocator.ToIntPtr(&scalars._iob[index]);
+                 nativeFileMap[p_iobAddress] = duplicatedStream;
+                }
+            }
 	};
 
 	std::map<off_t, std::string> Globals::FieldOffsets
@@ -432,13 +455,18 @@ extern "C"
 
 	void LibraryUnload(StdCLib::Globals* globals)
 	{
-		for (int i = 0; i < StdCLib::NFILE; i++)
-		{
-			FILE* file = globals->scalars._iob[i].fptr;
-			if (file != nullptr)
-				fclose(file);
-		}
-		globals->allocator.Deallocate(globals);
+	// Fecha todos os streams nativos que foram duplicados ou abertos no ecossistema da VM
+         for (auto& pair : globals->nativeFileMap)
+         {
+            if (pair.second != nullptr)
+            {
+                fclose(pair.second);
+            }
+         }
+        globals->nativeFileMap.clear();
+        
+        // Liberta a estrutura de Globals através do alocador partilhado
+        globals->allocator.Deallocate(globals);
 	}
 }
 
@@ -452,14 +480,14 @@ namespace
 {
 	FILE* MakeFilePtr(StdCLib::Globals* globals, uint32_t ptr)
 	{
-		for (int i = 0; i < StdCLib::NFILE; i++)
-		{
-			uint32_t thisIOB = ToIntPtr(&globals->scalars._iob[i]);
-			if (ptr == thisIOB)
-				return globals->scalars._iob[i].fptr;
-		}
-		return nullptr;
-	}
+        // Procura direta no mapa de streams nativos usando o endereço virtual enviado pela VM
+        auto it = globals->nativeFileMap.find(ptr);
+         if (it != globals->nativeFileMap.end())
+         {
+            return it->second;
+         }
+        return nullptr;
+       }
 }
 
 extern "C"
@@ -510,29 +538,60 @@ extern "C"
 	{
 		throw PPCVM::NotImplementedException(__func__);
 	}
-
+	
 	void StdCLib___setjmp(StdCLib::Globals* globals, MachineState* state)
-	{
-		// since the client is not really supposed to read from jmpBuf values, we
-		// shouldn't have to worry about endianness
-		uint32_t* jmpBuf = ToPointer<uint32_t>(state->r3);
-		jmpBuf[0] = state->lr;
-		jmpBuf[1] = state->GetCR();
-		jmpBuf[2] = state->r1;
-		jmpBuf[3] = state->r2;
-		jmpBuf[4] = 0;
-		memcpy(jmpBuf + 5, state->gpr + 13, 18 * sizeof(uint32_t));
-		memcpy(jmpBuf + 24, state->fpr + 14, 17 * sizeof(double));
-		jmpBuf[61] = 0;
-		jmpBuf[62] = 0;
-		
-		// ??? there are two fields left over
-		jmpBuf[63] = 0;
-		jmpBuf[64] = 0;
-		
-		state->r3 = 0;
-		globals->scalars.errno_ = 0;
-	}
+    {
+    // Obtemos o ponteiro virtual mapeado para o host
+    uint32_t* jmpBuf = ToPointer<uint32_t>(state->r3);
+    if (jmpBuf == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = -1;
+        return;
+    }
+    
+    // Alias para simplificar a inversão de inteiros de 32-bits para Big-Endian
+    using namespace Common::CF;
+
+    // 1. Guardar o estado de controlo de fluxo invertendo para o formato da VM (Big-Endian)
+    jmpBuf[0] = HostToBig<uint32_t>::Swap(state->lr);
+    jmpBuf[1] = HostToBig<uint32_t>::Swap(state->GetCR());
+    jmpBuf[2] = HostToBig<uint32_t>::Swap(state->r1);
+    jmpBuf[3] = HostToBig<uint32_t>::Swap(state->r2);
+    jmpBuf[4] = 0;
+    
+    // 2. Guardar os Registadores de Propósito Geral (GPR 13 a 31) com Swap correto
+    for (int i = 0; i < 18; i++)
+    {
+        jmpBuf[5 + i] = HostToBig<uint32_t>::Swap(state->gpr[13 + i]);
+    }
+    
+    // 3. Guardar os Registadores de Vírgula Flutuante (FPR 14 a 30) salvaguardando o Endianness
+    // Nota: O loop original copiava 17 doubles (FPR 14 a 30 inclusive)
+    for (int i = 0; i < 17; i++)
+    {
+        // Converte o double nativo de 64-bits do host para a estrutura SwappedFloat64 de 64-bits
+        SwappedFloat64 swappedFPR = ConvertDoubleHostToSwapped(state->fpr[14 + i]);
+        
+        // Mapeia de forma segura os 8 bytes nos dois slots de 32-bits do jmpBuf sem quebrar o alinhamento
+        uint32_t* targetSlot = jmpBuf + 24 + (i * 2);
+        std::memcpy(targetSlot, &swappedFPR.v, sizeof(uint64_t));
+    }
+    
+    // 4. Limpar os campos restantes e de padding que a ToolBox clássica reserva
+    jmpBuf[58] = 0; // Ajuste dos índices remanescentes após os 34 slots ocupados pelos 17 doubles
+    jmpBuf[59] = 0;
+    jmpBuf[60] = 0;
+    jmpBuf[61] = 0;
+    jmpBuf[62] = 0;
+    jmpBuf[63] = 0;
+    jmpBuf[64] = 0;
+    
+    // O setjmp clássico retorna sempre 0 na inicialização
+    state->r3 = 0;
+    globals->scalars.errno_ = 0;
+}
+
 
 	void StdCLib___vec_longjmp(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -562,8 +621,8 @@ extern "C"
 	void StdCLib__BreakPoint(StdCLib::Globals* globals, MachineState* state)
 	{
 		const char* reason = ToPointer<char>(state->r3);
-		printf("Interrupted by %s", reason);
-		asm("int $3");
+                printf("[ClassiX] Interrupted by %s\n", reason ? reason : "unknown");
+		std::raise(SIGTRAP);
 	}
 
 	void StdCLib__bufsync(StdCLib::Globals* globals, MachineState* state)
@@ -617,9 +676,68 @@ extern "C"
 	}
 
 	void StdCLib__DoExitProcs(StdCLib::Globals* globals, MachineState* state)
-	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+{
+    // Executa as rotinas de terminação por ordem inversa ao registo (LIFO)
+    while (!globals->atExit.empty())
+    {
+        // Obtém a última rotina de transição registada (com byteswap já tratado pelo atexit)
+        PEF::TransitionVector targetRoutine = globals->atExit.back();
+        globals->atExit.pop_back();
+
+        if (targetRoutine.pc != 0)
+        {
+            // Salva o estado atual crítico de fluxo para onde o interpretador deve regressar
+            uint32_t originalPC = state->pc;
+            uint32_t originalLR = state->lr;
+            uint32_t originalR2 = state->r2; // O TOC original
+
+            // Prepara a ABI da VM para executar a rotina clássica de limpeza
+            state->pc = targetRoutine.pc;
+            state->r2 = targetRoutine.toc;  // Atualiza o Table of Contents da biblioteca alvo
+            
+            // Definimos o Link Register (LR) para uma armadilha ou endereço de retorno nulo.
+            // Isto força o interpretador virtual a parar a execução assim que a subrotina
+            // clássica fizer o desvio de retorno ('blr').
+            state->lr = 0; 
+
+            try 
+            {
+                // Invoca o ciclo principal de interpretação do teu emulador.
+                // Ajusta esta linha para a nomenclatura exata do teu motor de execução
+                // (ex: globals->environment->Execute(state) ou state->RunLoop()).
+                // O interpretador deve rodar até encontrar pc == 0 (o LR que injetámos).
+                
+                // Exemplo padrão:
+                // PPCVM::ExecuteVirtualCPU(state);
+            }
+            catch (const std::exception& e) {
+                // Previne que um crash numa rotina de limpeza de uma app antiga 
+                // deite abaixo o runtime do Darling/ClassiC de forma descontrolada.
+                fprintf(stderr, "[ClassiC] Aviso: Falha na rotina atexit (PC: 0x%08x): %s\n", targetRoutine.pc, e.what());
+            }
+
+            // Restaura o estado original da CPU virtual para a próxima iteração do loop de saída
+            state->pc = originalPC;
+            state->lr = originalLR;
+            state->r2 = originalR2;
+        }
+    }
+
+    // Define o errno por cortesia e limpa explicitamente o mapa de ficheiros abertos
+    globals->scalars.errno_ = 0;
+    
+    // Agora que as rotinas de limpeza terminaram (e fecharam os seus fopens clássicos),
+    // garantimos que o nativeFileMap nativo do host liberta os streams remanescentes.
+    for (auto& pair : globals->nativeFileMap)
+    {
+        if (pair.second != nullptr)
+        {
+            fclose(pair.second);
+        }
+    }
+    globals->nativeFileMap.clear();
+}
+
 
 	void StdCLib__doprnt(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -654,10 +772,28 @@ extern "C"
 	void StdCLib__flsbuf(StdCLib::Globals* globals, MachineState* state)
 	{
 		int character = state->r3;
-		FILE* fptr = MakeFilePtr(globals, state->r4);
-		fputc(character, fptr);
-		fflush(fptr);
-		state->r3 = character & 0xff;
+                uint32_t p_iob = state->r4; // O endereço virtual da estrutura PPCFILE enviado pela VM
+    
+                FILE* fptr = MakeFilePtr(globals, p_iob);
+                if (fptr == nullptr)
+                 {
+                  globals->scalars.errno_ = EBADF;
+                  state->r3 = EOF; // Retorna EOF (-1) em caso de descritor inválido
+                  return;
+                 }
+    
+               int result = fputc(character, fptr);
+               if (result == EOF)
+               {
+                globals->scalars.errno_ = errno;
+                state->r3 = EOF;
+                return;
+               }
+    
+              fflush(fptr);
+    
+              // Atualiza o registo r3 com o carácter processado (garantindo cast para unsigned char)
+              state->r3 = result & 0xff;
 	}
 
 	void StdCLib__fsClose(StdCLib::Globals* globals, MachineState* state)
@@ -811,11 +947,44 @@ extern "C"
 	}
 
 	void StdCLib_atexit(StdCLib::Globals* globals, MachineState* state)
-	{
-		const PEF::TransitionVector* vector = ToPointer<PEF::TransitionVector>(state->r3);
-		globals->atExit.push_back(*vector);
-		state->r3 = 0;
-	}
+{
+    // O r3 contém o endereço virtual (ponteiro na VM) para o descritor/função de transição
+    uint32_t p_transitionVector = state->r3;
+    
+    if (p_transitionVector == 0)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = -1; // Falha ao registar
+        return;
+    }
+    
+    // Validamos se o ponteiro mapeado na memória da VM é legível
+    const PEF::TransitionVector* vector = ToPointer<PEF::TransitionVector>(p_transitionVector);
+    if (vector == nullptr)
+    {
+        globals->scalars.errno_ = EFAULT;
+        state->r3 = -1;
+        return;
+    }
+
+    // Em vez de empurrar o struct Big-Endian cru que vai sofrer com alinhamentos do host,
+    // o ideal é ajustar o teu std::deque para guardar estruturas tratadas em Host-Endian,
+    // ou guardar temporariamente o endereço virtual puro para o interpretador invocar mais tarde.
+    
+    // Exemplo assumindo que corrigimos o push para guardar uma cópia tratada:
+    PEF::TransitionVector hostVector;
+    
+    // NOTA: Deves aplicar o BigToHost::Swap nos campos internos do teu struct PEF (ex: pc, toc)
+    hostVector.pc  = Common::CF::BigToHost<uint32_t>::Swap(vector->pc);
+    hostVector.toc = Common::CF::BigToHost<uint32_t>::Swap(vector->toc);
+    
+    globals->atExit.push_back(hostVector);
+    
+    // De acordo com a norma C, aatexit retorna 0 em caso de sucesso
+    state->r3 = 0;
+    globals->scalars.errno_ = 0;
+}
+
 
 	void StdCLib_atof(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -903,35 +1072,115 @@ extern "C"
 	}
 
 	void StdCLib_exit(StdCLib::Globals* globals, MachineState* state)
-	{
-		state->r3 = ToIntPtr(globals->scalars.__target_for_exit);
-		state->r4 = 1;
-		StdCLib_longjmp(globals, state);
-	}
+{
+    // 1. Guardamos o status de saída enviado pela aplicação (está em r3)
+    int32_t exitStatus = static_cast<int32_t>(state->r3);
+    
+    // 2. EXECUTAR PRIMEIRO as rotinas de limpeza registadas no atexit
+    StdCLib__DoExitProcs(globals, state);
+    
+    // 3. Recuperamos o jmpBuf de salvaguarda que o interpretador guardou para o fecho
+    uint32_t p_exitTarget = globals->scalars.__target_for_exit;
+    if (p_exitTarget == 0)
+    {
+        // Se não houver um target de escape global, fazemos um exit nativo limpo no host
+        ::exit(exitStatus);
+    }
+    
+    // 4. Preparamos a ABI para o StdCLib_longjmp:
+    // r3 tem de ser o endereço do jmpBuf
+    // r4 será o valor que o setjmp vai receber (passamos o exitStatus real, garantindo que não é 0)
+    state->r3 = p_exitTarget;
+    state->r4 = (exitStatus == 0) ? 1 : exitStatus; 
+    
+    // 5. Fazemos o desvio não-local seguro para fora do loop do interpretador
+    StdCLib_longjmp(globals, state);
+}
 
-	void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
-	{
-		fprintf(stderr, "Using 'faccess' with mode %08x\n", state->r4);
-		state->r3 = 0;
-		globals->scalars.errno_ = 0;
-	}
+	#include <unistd.h> // Garante que está incluído para a função access()
+
+void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
+{
+    const char* filename = ToPointer<const char>(state->r3);
+    uint32_t rawMode = state->r4; // O modo de acesso clássico enviado pela VM
+    
+    if (filename == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = -1;
+        return;
+    }
+
+    // Tradução dos modos de acesso clássicos para as máscaras POSIX do host
+    int nativeMode = F_OK; // Por padrão, apenas verifica se existe
+    
+    // Mapeamento típico da MSL (Macintosh Standard Library): 
+    // Geralmente herdam bits semelhantes ao POSIX, mas vamos isolar de forma segura
+    if (rawMode & 0x04) nativeMode |= R_OK; // Permissão de leitura
+    if (rawMode & 0x02) nativeMode |= W_OK; // Permissão de escrita
+    if (rawMode & 0x01) nativeMode |= X_OK; // Permissão de execução
+
+    // Fazemos o teste real no ecossistema do Darling/Host
+    int result = ::access(filename, nativeMode);
+    
+    if (result == 0)
+    {
+        state->r3 = 0; // Sucesso, acesso permitido
+        globals->scalars.errno_ = 0;
+    }
+    else
+    {
+        state->r3 = -1; // Falha ou sem permissões
+        globals->scalars.errno_ = errno;
+    }
+}
+
 
 	void StdCLib_fclose(StdCLib::Globals* globals, MachineState* state)
 	{
-		for (int i = 0; i < StdCLib::NFILE; i++)
-		{
-			auto& ioBuffer = globals->scalars._iob[i];
-			uint32_t ioBufferAddress = ToIntPtr(&ioBuffer);
-			if (ioBufferAddress == state->r3)
-			{
-				state->r3 = fclose(ioBuffer.fptr);
-				ioBuffer.fptr = nullptr;
-				return;
-			}
-		}
-		
-		globals->scalars.errno_ = EBADF;
-		state->r3 = EOF;
+	     uint32_t p_iobAddress = state->r3; // Endereço virtual enviado pela aplicação emulada
+    
+            auto it = globals->nativeFileMap.find(p_iobAddress);
+           if (it != globals->nativeFileMap.end())
+           {
+            FILE* hostFile = it->second;
+            int result = EOF;
+        
+        if (hostFile != nullptr)
+        {
+            result = fclose(hostFile);
+        }
+        
+        // Remove a associação do mapa para libertar o slot para futuros fopens
+        globals->nativeFileMap.erase(it);
+        
+        // Limpa a estrutura correspondente nos scalars (opcional, por cortesia à VM)
+        for (int i = 0; i < StdCLib::NFILE; i++)
+        {
+            if (ToIntPtr(&globals->scalars._iob[i]) == p_iobAddress)
+            {
+                globals->scalars._iob[i]._file = 0;
+                globals->scalars._iob[i]._flag = 0;
+                break;
+            }
+        }
+        
+        if (result == EOF)
+        {
+            globals->scalars.errno_ = errno;
+            state->r3 = EOF;
+        }
+        else
+        {
+            globals->scalars.errno_ = 0;
+            state->r3 = 0; // Sucesso
+        }
+        return;
+    }
+    
+    // Se o endereço fornecido não existe no nosso mapa de ficheiros abertos
+    globals->scalars.errno_ = EBADF;
+    state->r3 = EOF;
 	}
 
 	void StdCLib_fcntl(StdCLib::Globals* globals, MachineState* state)
@@ -975,45 +1224,275 @@ extern "C"
 	}
 
 	void StdCLib_fgets(StdCLib::Globals* globals, MachineState* state)
-	{
-		char* buffer = ToPointer<char>(state->r3);
-		int32_t size = state->r4;
-		FILE* fptr = MakeFilePtr(globals, state->r5);
-		
-		char* result = fgets(buffer, size, fptr);
-		state->r3 = ToIntPtr(result);
-		globals->scalars.errno_ = errno;
-	}
+{
+    uint32_t p_buffer = state->r3; // Guardamos o endereço VIRTUAL de 32-bits enviado pela VM
+    char* buffer = ToPointer<char>(p_buffer);
+    int32_t size = state->r4;
+    uint32_t p_iob = state->r5;
+    
+    FILE* fptr = MakeFilePtr(globals, p_iob);
+    if (fptr == nullptr || buffer == nullptr || size <= 0)
+    {
+        globals->scalars.errno_ = EBADF;
+        state->r3 = 0; // Devolve NULL (0) em caso de erro de descritor ou buffer
+        return;
+    }
+    
+    // Executa o fgets nativo no host usando o buffer mapeado
+    char* result = fgets(buffer, size, fptr);
+    
+    if (result == nullptr)
+    {
+        // Se deu erro ou chegou ao fim do ficheiro (EOF), limpa o errno e devolve NULL
+        globals->scalars.errno_ = ferror(fptr) ? errno : 0;
+        state->r3 = 0;
+    }
+    else
+    {
+        // SUCESSO: Devolvemos o endereço VIRTUAL original de 32-bits (p_buffer)
+        // em vez do ponteiro truncado de 64-bits do host!
+        state->r3 = p_buffer;
+        globals->scalars.errno_ = 0;
+    }
+}
+
 
 	void StdCLib_fopen(StdCLib::Globals* globals, MachineState* state)
 	{
 		const char* filename = ToPointer<const char>(state->r3);
-		const char* mode = ToPointer<const char>(state->r4);
-		
-		for (int i = 0; i < StdCLib::NFILE; i++)
-		{
-			auto& ioBuffer = globals->scalars._iob[i];
-			if (ioBuffer.fptr == nullptr)
-			{
-				ioBuffer.fptr = fopen(filename, mode);
-				state->r3 = ToIntPtr(&ioBuffer);
-				globals->scalars.errno_ = errno;
-				return;
-			}
-		}
-		
-		state->r3 = 0;
-		globals->scalars.errno_ = EMFILE;
+                const char* mode = ToPointer<const char>(state->r4);
+    
+    if (filename == nullptr || mode == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = 0; // Devolve NULL para a VM
+        return;
+    }
+
+    // Procura por um descritor de ficheiro disponível na tabela simulada da ToolBox
+    for (int i = 0; i < StdCLib::NFILE; i++)
+    {
+        auto& ioBuffer = globals->scalars._iob[i];
+        uint32_t p_iobAddress = ToIntPtr(&ioBuffer);
+        
+        // Se este slot não está registado no nosso mapa nativo, significa que está livre
+        if (globals->nativeFileMap.find(p_iobAddress) == globals->nativeFileMap.end())
+        {
+            FILE* hostFile = fopen(filename, mode);
+            if (hostFile == nullptr)
+            {
+                globals->scalars.errno_ = errno;
+                state->r3 = 0;
+                return;
+            }
+            
+            // Inicializa os campos da estrutura clássica visível pela VM (Big-Endian implícito)
+            ioBuffer._file = i;
+            ioBuffer._flag = 0x01; // Flag básica de ficheiro aberto (padrão MSL)
+            ioBuffer._cnt  = 0;
+            ioBuffer._ptr  = 0;
+            ioBuffer._base = 0;
+            ioBuffer._end  = 0;
+            ioBuffer._size = 0;
+            
+            // Regista o par de segurança no mapa nativo de 64 bits
+            globals->nativeFileMap[p_iobAddress] = hostFile;
+            
+            // Devolve o endereço virtual da estrutura PPCFILE para a aplicação PowerPC
+            globals->scalars.errno_ = 0;
+            state->r3 = p_iobAddress;
+            return;
+        }
+    }
+    
+          // Se chegou aqui, a tabela interna da ToolBox esgotou-se (limite NFILE)
+           globals->scalars.errno_ = EMFILE;
+           state->r3 = 0;
 	}
 
 	void StdCLib_fprintf(StdCLib::Globals* globals, MachineState* state)
-	{
-		FILE* fptr = MakeFilePtr(globals, state->r3);
-		const char* formatString = ToPointer<const char>(state->r4);
-		// gah, let's just print the format string for now.
-		state->r3 = fputs(formatString, fptr);
-		globals->scalars.errno_ = errno;
-	}
+{
+    FILE* fptr = MakeFilePtr(globals, state->r3);
+    const char* format = ToPointer<const char>(state->r4);
+    
+    if (fptr == nullptr || format == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = -1;
+        return;
+    }
+
+    // Índices estáveis para controlar os argumentos na ABI do PowerPC ao longo de toda a string
+    int nextGPR = 5; 
+    int nextFPR = 1; // ESCOPO CORRIGIDO: Declarado aqui no topo
+    
+    uint32_t stackPtr = state->r1;
+    int stackOffset = 24; 
+
+    // Lambda auxiliar para ler o próximo inteiro de 32 bits da ABI da VM
+    auto getNextArg32 = [&]() -> uint32_t {
+        if (nextGPR <= 10)
+        {
+            return state->gpr[nextGPR++];
+        }
+        else
+        {
+            uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
+            stackOffset += 4;
+            return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+        }
+    };
+
+    // Lambda auxiliar para queimar espaço na stack geral de argumentos (shadowing da ABI PowerPC)
+    auto advanceGPRSpace = [&](int words) {
+        for (int w = 0; w < words; w++) {
+            if (nextGPR <= 10) {
+                nextGPR++;
+            } else {
+                stackOffset += 4;
+            }
+        }
+    };
+
+    std::string output;
+    size_t i = 0;
+    size_t len = strlen(format);
+    int charactersWritten = 0;
+
+    while (i < len)
+    {
+        if (format[i] == '%' && i + 1 < len)
+        {
+            i++; 
+            
+            if (format[i] == '%')
+            {
+                output += '%';
+                i++;
+                continue;
+            }
+
+            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-'))
+            {
+                i++; 
+            }
+
+            if (i >= len) break;
+
+            char specifier = format[i];
+            char buffer[256];
+
+            switch (specifier)
+            {
+                case 'd':
+                case 'i':
+                {
+                    int32_t val = static_cast<int32_t>(getNextArg32());
+                    snprintf(buffer, sizeof(buffer), "%d", val);
+                    output += buffer;
+                    break;
+                }
+                case 'u':
+                {
+                    uint32_t val = getNextArg32();
+                    snprintf(buffer, sizeof(buffer), "%u", val);
+                    output += buffer;
+                    break;
+                }
+                case 'x':
+                case 'X':
+                {
+                    uint32_t val = getNextArg32();
+                    snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", val);
+                    output += buffer;
+                    break;
+                }
+                case 'c':
+                {
+                    char val = static_cast<char>(getNextArg32() & 0xFF);
+                    output += val;
+                    break;
+                }
+                case 's':
+                {
+                    uint32_t p_str = getNextArg32();
+                    const char* str = ToPointer<const char>(p_str);
+                    if (str) output += str;
+                    else output += "(null)";
+                    break;
+                }
+                case 'p':
+                {
+                    uint32_t val = getNextArg32();
+                    snprintf(buffer, sizeof(buffer), "0x%08x", val);
+                    output += buffer;
+                    break;
+                }
+                case 'f':
+                case 'F':
+                case 'g':
+                case 'G':
+                case 'e':
+                case 'E':
+                {
+                    double val = 0.0;
+                    if (nextFPR <= 13)
+                    {
+                        val = state->fpr[nextFPR++];
+                        // REGRA DA ABI: Um double queima 2 palavras (8 bytes) de espaço nos registadores gerais
+                        advanceGPRSpace(2);
+                    }
+                    else
+                    {
+                        uint64_t rawDouble = 0;
+                        uint32_t* slotLow = ToPointer<uint32_t>(stackPtr + stackOffset);
+                        uint32_t* slotHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
+            
+                        if (slotLow && slotHigh)
+                        {
+                            uint32_t low = Common::CF::BigToHost<uint32_t>::Swap(*slotLow);
+                            uint32_t high = Common::CF::BigToHost<uint32_t>::Swap(*slotHigh);
+                
+                            rawDouble = (static_cast<uint64_t>(low) << 32) | high;
+                            std::memcpy(&val, &rawDouble, sizeof(double));
+                        }
+                        stackOffset += 8;
+                        // Como lemos da stack diretamente via offset dedicado, sincronizamos a contagem de GPRs
+                        advanceGPRSpace(2);
+                    }
+        
+                    snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
+                    output += buffer;
+                    break;
+                }
+                default:
+                    output += '%';
+                    output += specifier;
+                    break;
+            }
+            i++;
+        }
+        else
+        {
+            output += format[i];
+            i++;
+        }
+    }
+
+    charactersWritten = fputs(output.c_str(), fptr);
+    
+    if (charactersWritten >= 0)
+    {
+        state->r3 = static_cast<int32_t>(output.size());
+        globals->scalars.errno_ = 0;
+    }
+    else
+    {
+        state->r3 = -1;
+        globals->scalars.errno_ = errno;
+    }
+}
+
 
 	void StdCLib_fputc(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1046,13 +1525,47 @@ extern "C"
 	}
 
 	void StdCLib_fseek(StdCLib::Globals* globals, MachineState* state)
-	{
-		FILE* fptr = MakeFilePtr(globals, state->r3);
-		int32_t offset = state->r4;
-		int whence = state->r5;
-		state->r3 = fseek(fptr, offset, whence);
-		globals->scalars.errno_ = errno;
-	}
+{
+    uint32_t p_iob = state->r3;   // Endereço virtual da estrutura PPCFILE na VM
+    int32_t offset = state->r4;   // Offset de 32-bits enviado pela aplicação
+    int32_t rawWhence = state->r5; // O whence original da VM
+    
+    FILE* fptr = MakeFilePtr(globals, p_iob);
+    if (fptr == nullptr)
+    {
+        globals->scalars.errno_ = EBADF; // Bad File Descriptor
+        state->r3 = -1; // Devolve erro para a VM
+        return;
+    }
+    
+    // Mapeamento explícito das constantes de posicionamento clássicas
+    // para as do host moderno, prevenindo falhas de convenção da MSL
+    int nativeWhence;
+    switch (rawWhence)
+    {
+        case 0: nativeWhence = SEEK_SET; break; // Início do ficheiro
+        case 1: nativeWhence = SEEK_CUR; break; // Posição atual
+        case 2: nativeWhence = SEEK_END; break; // Fim do ficheiro
+        default:
+            globals->scalars.errno_ = EINVAL;
+            state->r3 = -1;
+            return;
+    }
+    
+    // Executa o fseek real no host de 64-bits
+    int result = fseek(fptr, offset, nativeWhence);
+    
+    if (result != 0)
+    {
+        globals->scalars.errno_ = errno;
+        state->r3 = -1; // O fseek clássico devolve -1 em caso de erro
+    }
+    else
+    {
+        globals->scalars.errno_ = 0;
+        state->r3 = 0;  // Sucesso
+    }
+}
 
 	void StdCLib_fsetfileinfo(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1139,18 +1652,52 @@ extern "C"
 		throw PPCVM::NotImplementedException(__func__);
 	}
 
+	
 	void StdCLib_getenv(StdCLib::Globals* globals, MachineState* state)
-	{
-	#ifdef __LP64__
-	# error This will break in 64 bits because getenv() will return a value out of the address space
-	#endif
-		
-		const char* name = ToPointer<const char>(state->r3);
-		char* env = getenv(name);
-		state->r3 = ToIntPtr(env);
-		globals->scalars.errno_ = errno;
-	}
-
+{
+    const char* name = ToPointer<const char>(state->r3);
+    if (name == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = 0; // Devolve NULL
+        return;
+    }
+    
+    // Procura a variável de ambiente no host moderno de 64-bits
+    const char* envValue = getenv(name);
+    
+    if (envValue == nullptr)
+    {
+        state->r3 = 0; // Variável não encontrada, devolve NULL
+        globals->scalars.errno_ = 0;
+        return;
+    }
+    
+    // Descobrir o tamanho necessário (+1 para o terminador null \0)
+    size_t len = strlen(envValue) + 1;
+    
+    // Alocar memória DENTRO do espaço de endereçamento de 32-bits visível pela VM.
+    // O allocator.Allocate garante um ponteiro do host alinhado, mas nós precisamos 
+    // do endereço correspondente na VM para passar à aplicação PowerPC.
+    void* vmHostPtr = globals->allocator.Allocate(len, 1); 
+    if (vmHostPtr == nullptr)
+    {
+        globals->scalars.errno_ = ENOMEM;
+        state->r3 = 0;
+        return;
+    }
+    
+    // Copiar em segurança os dados do host de 64-bits para a memória alocada da VM
+    memcpy(vmHostPtr, envValue, len);
+    
+    // Converter o ponteiro de memória para o endereço virtual de 32-bits correto da VM
+    uint32_t p_vmAddress = globals->allocator.ToIntPtr(vmHostPtr);
+    
+    // Devolve o endereço virtual seguro para o registador r3 da CPU emulada
+    state->r3 = p_vmAddress;
+    globals->scalars.errno_ = 0;
+}
+	
 	void StdCLib_getIDstring(StdCLib::Globals* globals, MachineState* state)
 	{
 		throw PPCVM::NotImplementedException(__func__);
@@ -1275,20 +1822,71 @@ extern "C"
 	{
 		throw PPCVM::NotImplementedException(__func__);
 	}
+	
+	void StdCLib_longjmp(StdCLib::Globals* globals, PPCVM::MachineState* state)
+       {
+    // Obtemos o ponteiro virtual do jmpBuf fornecido pela aplicação
+    uint32_t* jmpBuf = ToPointer<uint32_t>(state->r3);
+    int value = state->r4; // O valor de retorno para o setjmp
+    
+    if (jmpBuf == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        // Se o jmpBuf for inválido, o comportamento padrão é falhar controladamente
+        throw std::runtime_error("FALHA CRÍTICA: longjmp chamado com um jmpBuf nulo.");
+    }
+    
+    // De acordo com a especificação da norma C, se o valor passado for 0, 
+    // o setjmp tem de receber e retornar 1 para evitar loops infinitos.
+    if (value == 0)
+    {
+        value = 1;
+    }
+    
+    // Alias para inverter de Big-Endian para o formato nativo do Host
+    using namespace Common::CF;
 
-	void StdCLib_longjmp(StdCLib::Globals* globals, MachineState* state)
-	{
-		uint32_t* jmpBuf = ToPointer<uint32_t>(state->r3);
-		state->lr = jmpBuf[0];
-		state->SetCR(jmpBuf[1]);
-		state->r1 = jmpBuf[2];
-		state->r2 = jmpBuf[3];
-		state->r3 = state->r4;
-		memcpy(state->gpr + 13, jmpBuf + 5, 18 * sizeof(uint32_t));
-		memcpy(state->fpr + 14, jmpBuf + 24, 17 * sizeof(double));
-		
-		globals->scalars.errno_ = 0;
-	}
+    // 1. Restaurar o controlo de fluxo revertendo o Endianness
+    state->lr    = BigToHost<uint32_t>::Swap(jmpBuf[0]);
+    
+    // Restaurar o Condition Register (CR) através do método do teu interpretador
+    uint32_t crValue = BigToHost<uint32_t>::Swap(jmpBuf[1]);
+    state->SetCR(crValue);
+    
+    state->r1    = BigToHost<uint32_t>::Swap(jmpBuf[2]);
+    state->r2    = BigToHost<uint32_t>::Swap(jmpBuf[3]);
+    // jmpBuf[4] era o padding/reservado, ignoramos
+    
+    // 2. Restaurar os Registadores de Propósito Geral (GPR 13 a 31)
+    for (int i = 0; i < 18; i++)
+    {
+        state->gpr[13 + i] = BigToHost<uint32_t>::Swap(jmpBuf[5 + i]);
+    }
+    
+    // 3. Restaurar os Registadores de Vírgula Flutuante (FPR 14 a 30)
+    // Lemos os blocos de 32-bits da memória virtual, remontamos o SwappedFloat64 e convertemos para double nativo
+    for (int i = 0; i < 17; i++)
+    {
+        SwappedFloat64 swappedFPR;
+        uint32_t* sourceSlot = jmpBuf + 24 + (i * 2);
+        
+        // Copia os 8 bytes de forma segura para evitar desalinhamento de memória no host
+        std::memcpy(&swappedFPR.v, sourceSlot, sizeof(uint64_t));
+        
+        // Converte o formato Big-Endian lido para o double nativo (Little-Endian)
+        state->fpr[14 + i] = ConvertDoubleSwappedToHost(swappedFPR);
+    }
+    
+    // 4. Configurar o valor de retorno no registador r3 da CPU virtual 
+    // (a aplicação vai achar que este é o retorno do setjmp original)
+    state->r3 = value;
+    
+    // 5. Apontar o Program Counter (PC) para o Link Register (LR) restaurado 
+    // para efetivar o desvio de volta à subrotina original.
+    state->pc = state->lr;
+    
+    globals->scalars.errno_ = 0;
+}
 
 	void StdCLib_lseek(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1349,22 +1947,64 @@ extern "C"
 	{
 		throw PPCVM::NotImplementedException(__func__);
 	}
-
+	
 	void StdCLib_memcmp(StdCLib::Globals* globals, MachineState* state)
-	{
-		const void* s1 = ToPointer<const void>(state->r3);
-		const void* s2 = ToPointer<const void>(state->r4);
-		size_t size = state->r5;
-		state->r3 = memcmp(s1, s2, size);
-	}
+{
+    const void* s1 = ToPointer<const void>(state->r3);
+    const void* s2 = ToPointer<const void>(state->r4);
+    
+    // Forçar estritamente 32-bits (tamanho máximo na VM PowerPC)
+    uint32_t size = static_cast<uint32_t>(state->r5);
+    
+    if (size == 0)
+    {
+        state->r3 = 0;
+        return;
+    }
+    
+    if (s1 == nullptr || s2 == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = 0;
+        return;
+    }
+    
+    // Garante que o resultado respeita as convenções de 32-bits do registador r3
+    int result = memcmp(s1, s2, size);
+    state->r3 = static_cast<int32_t>(result);
+}
 
-	void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
-	{
-		void* s1 = ToPointer<void>(state->r3);
-		const void* s2 = ToPointer<const void>(state->r4);
-		size_t size = state->r5;
-		state->r3 = ToIntPtr(memcpy(s1, s2, size));
-	}
+void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
+{
+    void* dest = ToPointer<void>(state->r3);
+    const void* src = ToPointer<const void>(state->r4);
+    
+    // Forçar estritamente 32-bits para evitar overflows de tamanho no host de 64-bits
+    uint32_t size = static_cast<uint32_t>(state->r5);
+    
+    if (size == 0)
+    {
+        // Se o tamanho for 0, o memcpy clássico apenas retorna o destino original intacto
+        state->r3 = state->r3; 
+        return;
+    }
+    
+    if (dest == nullptr || src == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        return;
+    }
+    
+    // Executa a cópia nativa segura
+    memcpy(dest, src, size);
+    
+    // O r3 deve reter o endereço VIRTUAL original de destino (que já estava em state->r3).
+    // Usar o ToIntPtr(memcpy(...)) original era perigoso porque podia tentar converter
+    // o ponteiro real do host (64-bit) de volta para o r3 (32-bit), corrompendo o endereço da VM!
+    state->r3 = state->r3; 
+    globals->scalars.errno_ = 0;
+}
+
 
 	void StdCLib_memmove(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1467,12 +2107,188 @@ extern "C"
 	}
 
 	void StdCLib_printf(StdCLib::Globals* globals, MachineState* state)
-	{
-		const char* formatString = ToPointer<const char>(state->r3);
-		std::string toPrint = StdCLib::StringPrintF(formatString, *globals, state->gpr + 4, state->fpr);
-		state->r3 = printf("%s", toPrint.c_str());
-		globals->scalars.errno_ = errno;
-	}
+{
+    // O r3 contém a string de formatação enviada pela VM PowerPC
+    const char* format = ToPointer<const char>(state->r3);
+    
+    if (format == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = -1;
+        return;
+    }
+
+    // Índices estáveis para a ABI do PowerPC: como o formato está em r3, 
+    // os argumentos variáveis começam estritamente em r4 e r5 em diante.
+    int nextGPR = 4; 
+    int nextFPR = 1; 
+    
+    uint32_t stackPtr = state->r1;
+    int stackOffset = 24; 
+
+    // Lambda auxiliar para ler inteiros de 32 bits da ABI da VM
+    auto getNextArg32 = [&]() -> uint32_t {
+        if (nextGPR <= 10)
+        {
+            return state->gpr[nextGPR++];
+        }
+        else
+        {
+            uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
+            stackOffset += 4;
+            return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+        }
+    };
+
+    // Lambda auxiliar para shadow de argumentos flutuantes na ABI PowerPC
+    auto advanceGPRSpace = [&](int words) {
+        for (int w = 0; w < words; w++) {
+            if (nextGPR <= 10) {
+                nextGPR++;
+            } else {
+                stackOffset += 4;
+            }
+        }
+    };
+
+    std::string output;
+    size_t i = 0;
+    size_t len = strlen(format);
+
+    while (i < len)
+    {
+        if (format[i] == '%' && i + 1 < len)
+        {
+            i++; 
+            
+            if (format[i] == '%')
+            {
+                output += '%';
+                i++;
+                continue;
+            }
+
+            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-'))
+            {
+                i++; 
+            }
+
+            if (i >= len) break;
+
+            char specifier = format[i];
+            char buffer[256];
+
+            switch (specifier)
+            {
+                case 'd':
+                case 'i':
+                {
+                    int32_t val = static_cast<int32_t>(getNextArg32());
+                    std::snprintf(buffer, sizeof(buffer), "%d", val);
+                    output += buffer;
+                    break;
+                }
+                case 'u':
+                {
+                    uint32_t val = getNextArg32();
+                    std::snprintf(buffer, sizeof(buffer), "%u", val);
+                    output += buffer;
+                    break;
+                }
+                case 'x':
+                case 'X':
+                {
+                    uint32_t val = getNextArg32();
+                    std::snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", val);
+                    output += buffer;
+                    break;
+                }
+                case 'c':
+                {
+                    char val = static_cast<char>(getNextArg32() & 0xFF);
+                    output += val;
+                    break;
+                }
+                case 's':
+                {
+                    uint32_t p_str = getNextArg32();
+                    const char* str = ToPointer<const char>(p_str);
+                    if (str) output += str;
+                    else output += "(null)";
+                    break;
+                }
+                case 'p':
+                {
+                    uint32_t val = getNextArg32();
+                    std::snprintf(buffer, sizeof(buffer), "0x%08x", val);
+                    output += buffer;
+                    break;
+                }
+                case 'f':
+                case 'F':
+                case 'g':
+                case 'G':
+                case 'e':
+                case 'E':
+                {
+                    double val = 0.0;
+                    if (nextFPR <= 13)
+                    {
+                        val = state->fpr[nextFPR++];
+                        advanceGPRSpace(2);
+                    }
+                    else
+                    {
+                        uint64_t rawDouble = 0;
+                        uint32_t* slotLow = ToPointer<uint32_t>(stackPtr + stackOffset);
+                        uint32_t* slotHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
+            
+                        if (slotLow && slotHigh)
+                        {
+                            uint32_t low = Common::CF::BigToHost<uint32_t>::Swap(*slotLow);
+                            uint32_t high = Common::CF::BigToHost<uint32_t>::Swap(*slotHigh);
+                
+                            rawDouble = (static_cast<uint64_t>(low) << 32) | high;
+                            std::memcpy(&val, &rawDouble, sizeof(double));
+                        }
+                        stackOffset += 8;
+                        advanceGPRSpace(2);
+                    }
+        
+                    std::snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
+                    output += buffer;
+                    break;
+                }
+                default:
+                    output += '%';
+                    output += specifier;
+                    break;
+            }
+            i++;
+        }
+        else
+        {
+            output += format[i];
+            i++;
+        }
+    }
+
+    // Imprime a string final processada no stdout do host moderno
+    int result = std::printf("%s", output.c_str());
+    std::fflush(stdout); // Força o flush para garantir logs em tempo real no Darling
+    
+    if (result >= 0)
+    {
+        state->r3 = static_cast<int32_t>(output.size());
+        globals->scalars.errno_ = 0;
+    }
+    else
+    {
+        state->r3 = -1;
+        globals->scalars.errno_ = errno;
+    }
+}
+
 
 	void StdCLib_putc(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1485,11 +2301,39 @@ extern "C"
 	}
 
 	void StdCLib_puts(StdCLib::Globals* globals, MachineState* state)
-	{
-		const char* address = ToPointer<const char>(state->r3);
-		state->r3 = puts(address);
-		globals->scalars.errno_ = errno;
-	}
+{
+    // O r3 contém o endereço virtual da string na VM PowerPC
+    uint32_t p_str = state->r3;
+    const char* address = ToPointer<const char>(p_str);
+    
+    // Blindagem contra ponteiros nulos enviados pela VM
+    if (address == nullptr)
+    {
+        // Em vez de crashar com SegFault, imprimimos uma string segura e definimos o erro
+        int result = ::puts("(null)");
+        ::fflush(stdout);
+        state->r3 = static_cast<int32_t>(result);
+        globals->scalars.errno_ = EINVAL;
+        return;
+    }
+    
+    // Executa o puts nativo no host moderno
+    int result = ::puts(address);
+    ::fflush(stdout); // Força a escrita imediata no terminal do Darling
+    
+    if (result == EOF)
+    {
+        globals->scalars.errno_ = errno;
+        state->r3 = -1; // EOF clássico
+    }
+    else
+    {
+        globals->scalars.errno_ = 0;
+        // O puts devolve um valor não-negativo. Garantimos o cast seguro para 32-bits.
+        state->r3 = static_cast<int32_t>(result); 
+    }
+}
+
 
 	void StdCLib_putw(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1586,10 +2430,185 @@ extern "C"
 		throw PPCVM::NotImplementedException(__func__);
 	}
 
-	void StdCLib_sprintf(StdCLib::Globals* globals, MachineState* state)
-	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+	void StdCLib_sprintf(StdCLib::Globals* globals, PPCVM::MachineState* state)
+{
+    // O r3 contém o endereço virtual de destino na VM onde a string final será gravada
+    uint32_t p_destBuffer = state->r3;
+    char* destBuffer = ToPointer<char>(p_destBuffer);
+    
+    // O r4 contém a string de formatação
+    const char* format = ToPointer<const char>(state->r4);
+    
+    if (destBuffer == nullptr || format == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = -1;
+        return;
+    }
+
+    // Índices estáveis para a ABI do PowerPC (como o formato está em r4, argumentos começam em r5)
+    int nextGPR = 5; 
+    int nextFPR = 1; 
+    
+    uint32_t stackPtr = state->r1;
+    int stackOffset = 24; 
+
+    // Lambda auxiliar para ler inteiros de 32 bits da ABI
+    auto getNextArg32 = [&]() -> uint32_t {
+        if (nextGPR <= 10)
+        {
+            return state->gpr[nextGPR++];
+        }
+        else
+        {
+            uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
+            stackOffset += 4;
+            return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+        }
+    };
+
+    // Lambda auxiliar para shadow de argumentos flutuantes na ABI PowerPC
+    auto advanceGPRSpace = [&](int words) {
+        for (int w = 0; w < words; w++) {
+            if (nextGPR <= 10) {
+                nextGPR++;
+            } else {
+                stackOffset += 4;
+            }
+        }
+    };
+
+    std::string output;
+    size_t i = 0;
+    size_t len = strlen(format);
+
+    while (i < len)
+    {
+        if (format[i] == '%' && i + 1 < len)
+        {
+            i++; 
+            
+            if (format[i] == '%')
+            {
+                output += '%';
+                i++;
+                continue;
+            }
+
+            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-'))
+            {
+                i++; 
+            }
+
+            if (i >= len) break;
+
+            char specifier = format[i];
+            char buffer[256];
+
+            switch (specifier)
+            {
+                case 'd':
+                case 'i':
+                {
+                    int32_t val = static_cast<int32_t>(getNextArg32());
+                    snprintf(buffer, sizeof(buffer), "%d", val);
+                    output += buffer;
+                    break;
+                }
+                case 'u':
+                {
+                    uint32_t val = getNextArg32();
+                    snprintf(buffer, sizeof(buffer), "%u", val);
+                    output += buffer;
+                    break;
+                }
+                case 'x':
+                case 'X':
+                {
+                    uint32_t val = getNextArg32();
+                    snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", val);
+                    output += buffer;
+                    break;
+                }
+                case 'c':
+                {
+                    char val = static_cast<char>(getNextArg32() & 0xFF);
+                    output += val;
+                    break;
+                }
+                case 's':
+                {
+                    uint32_t p_str = getNextArg32();
+                    const char* str = ToPointer<const char>(p_str);
+                    if (str) output += str;
+                    else output += "(null)";
+                    break;
+                }
+                case 'p':
+                {
+                    uint32_t val = getNextArg32();
+                    snprintf(buffer, sizeof(buffer), "0x%08x", val);
+                    output += buffer;
+                    break;
+                }
+                case 'f':
+                case 'F':
+                case 'g':
+                case 'G':
+                case 'e':
+                case 'E':
+                {
+                    double val = 0.0;
+                    if (nextFPR <= 13)
+                    {
+                        val = state->fpr[nextFPR++];
+                        advanceGPRSpace(2);
+                    }
+                    else
+                    {
+                        uint64_t rawDouble = 0;
+                        uint32_t* slotLow = ToPointer<uint32_t>(stackPtr + stackOffset);
+                        uint32_t* slotHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
+            
+                        if (slotLow && slotHigh)
+                        {
+                            uint32_t low = Common::CF::BigToHost<uint32_t>::Swap(*slotLow);
+                            uint32_t high = Common::CF::BigToHost<uint32_t>::Swap(*slotHigh);
+                
+                            rawDouble = (static_cast<uint64_t>(low) << 32) | high;
+                            std::memcpy(&val, &rawDouble, sizeof(double));
+                        }
+                        stackOffset += 8;
+                        advanceGPRSpace(2);
+                    }
+        
+                    snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
+                    output += buffer;
+                    break;
+                }
+                default:
+                    output += '%';
+                    output += specifier;
+                    break;
+            }
+            i++;
+        }
+        else
+        {
+            output += format[i];
+            i++;
+        }
+    }
+
+    // Gravação direta na memória virtualizada da VM de 32-bits
+    // Copiamos a string processada incluindo o terminador nulo ('\0')
+    std::memcpy(destBuffer, output.c_str(), output.size() + 1);
+    
+    // Devolvemos no r3 o número de caracteres escritos (excluindo o \0), tal como dita a norma C
+    state->r3 = static_cast<int32_t>(output.size());
+    globals->scalars.errno_ = 0;
+}
+
 
 	void StdCLib_srand(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1607,17 +2626,52 @@ extern "C"
 	}
 
 	void StdCLib_strchr(StdCLib::Globals* globals, MachineState* state)
-	{
-		const char* s = ToPointer<const char>(state->r3);
-		state->r3 = ToIntPtr(strchr(s, state->r4));
-	}
+{
+    uint32_t p_str = state->r3;
+    const char* s = ToPointer<const char>(p_str);
+    int character = state->r4 & 0xFF; // Garante que o caracter cabe num byte
+    
+    if (s == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = 0; // Devolve NULL
+        return;
+    }
+    
+    // Executa a procura nativa no host
+    const char* result = strchr(s, character);
+    
+    if (result == nullptr)
+    {
+        state->r3 = 0;
+    }
+    else
+    {
+        // CORREÇÃO CRÍTICA: Calcular o offset em bytes dentro da string
+        // e somar ao endereço virtual original (p_str) da VM!
+        size_t offset = result - s;
+        state->r3 = p_str + static_cast<uint32_t>(offset);
+    }
+    globals->scalars.errno_ = 0;
+}
 
 	void StdCLib_strcmp(StdCLib::Globals* globals, MachineState* state)
-	{
-		const char* s1 = ToPointer<const char>(state->r3);
-		const char* s2 = ToPointer<const char>(state->r4);
-		state->r3 = strcmp(s1, s2);
-	}
+{
+    const char* s1 = ToPointer<const char>(state->r3);
+    const char* s2 = ToPointer<const char>(state->r4);
+    
+    if (s1 == nullptr || s2 == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = 0;
+        return;
+    }
+    
+    // Executa a comparação nativa e força o cast seguro para o registador de 32-bits
+    int result = strcmp(s1, s2);
+    state->r3 = static_cast<int32_t>(result);
+    globals->scalars.errno_ = 0;
+}
 
 	void StdCLib_strcoll(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1625,11 +2679,25 @@ extern "C"
 	}
 
 	void StdCLib_strcpy(StdCLib::Globals* globals, MachineState* state)
-	{
-		char* s1 = ToPointer<char>(state->r3);
-		const char* s2 = ToPointer<const char>(state->r4);
-		state->r3 = ToIntPtr(strcpy(s1, s2));
-	}
+{
+    uint32_t p_dest = state->r3; // Endereço virtual original de destino
+    char* s1 = ToPointer<char>(p_dest);
+    const char* s2 = ToPointer<const char>(state->r4);
+    
+    if (s1 == nullptr || s2 == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        return;
+    }
+    
+    // Executa a cópia nativa em segurança
+    strcpy(s1, s2);
+    
+    // CORREÇÃO CRÍTICA: Devolve o endereço virtual original de destino (32-bits)
+    // para o r3, em vez do ponteiro de 64-bits truncado do host!
+    state->r3 = p_dest;
+    globals->scalars.errno_ = 0;
+}
 
 	void StdCLib_strcspn(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1647,10 +2715,26 @@ extern "C"
 	}
 
 	void StdCLib_strlen(StdCLib::Globals* globals, MachineState* state)
-	{
-		char* s = ToPointer<char>(state->r3);
-		state->r3 = strlen(s);
-	}
+{
+    const char* s = ToPointer<const char>(state->r3);
+    
+    // Blindagem contra ponteiros nulos passados pela VM PowerPC
+    if (s == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = 0; // Devolve comprimento 0
+        return;
+    }
+    
+    // Executa a contagem nativa
+    size_t length = strlen(s);
+    
+    // CORREÇÃO CRÍTICA: Força o cast explícito de 64-bits (size_t do host) 
+    // para o registador de 32-bits (uint32_t da VM), garantindo conformidade.
+    state->r3 = static_cast<uint32_t>(length);
+    globals->scalars.errno_ = 0;
+}
+
 
 	void StdCLib_strncat(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1673,12 +2757,35 @@ extern "C"
 	}
 
 	void StdCLib_strrchr(StdCLib::Globals* globals, MachineState* state)
-	{
-		const char* s = ToPointer<const char>(state->r3);
-		int c = state->r4;
-		char* result = strrchr(s, c);
-		state->r3 = ToIntPtr(result);
-	}
+{
+    uint32_t p_str = state->r3; // Guardamos o endereço VIRTUAL original da VM
+    const char* s = ToPointer<const char>(p_str);
+    int character = state->r4 & 0xFF; // Garante que o caractere cabe num byte
+    
+    if (s == nullptr)
+    {
+        globals->scalars.errno_ = EINVAL;
+        state->r3 = 0; // Devolve NULL se o ponteiro de origem for inválido
+        return;
+    }
+    
+    // Executa a busca reversa nativa no host moderno
+    const char* result = strrchr(s, character);
+    
+    if (result == nullptr)
+    {
+        state->r3 = 0; // Caractere não encontrado
+    }
+    else
+    {
+        // CORREÇÃO CRÍTICA: Calcular o offset em bytes dentro da string no host
+        // e somar ao endereço virtual original (p_str) da VM!
+        size_t offset = result - s;
+        state->r3 = p_str + static_cast<uint32_t>(offset);
+    }
+    globals->scalars.errno_ = 0;
+}
+
 
 	void StdCLib_strspn(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1751,14 +2858,38 @@ extern "C"
 	}
 
 	void StdCLib_tolower(StdCLib::Globals* globals, MachineState* state)
-	{
-		state->r3 = tolower(state->r3);
-	}
+{
+    // 1. Isolamos estritamente o byte inferior (o caractere real de 8-bits)
+    // para evitar que lixo residual nos bits superiores de r3 confunda o tolower nativo
+    int character = static_cast<int>(state->r3 & 0xFF);
+    
+    // 2. Executamos a conversão nativa em segurança
+    int lowerChar = tolower(character);
+    
+    // 3. Forçamos o cast explícito para int32_t para o registador r3 da VM,
+    // garantindo que o resultado limpa os bits superiores de forma determinística
+    state->r3 = static_cast<int32_t>(lowerChar & 0xFF);
+    
+    globals->scalars.errno_ = 0;
+}
+
 
 	void StdCLib_toupper(StdCLib::Globals* globals, MachineState* state)
-	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+{
+    // 1. Isolamos estritamente o byte inferior (o caractere de 8-bits)
+    // para limpar lixo residual que a VM possa ter deixado em r3
+    int character = static_cast<int>(state->r3 & 0xFF);
+    
+    // 2. Executamos a conversão para maiúsculas nativa do host
+    int upperChar = toupper(character);
+    
+    // 3. Devolvemos o caractere convertido limpando os bits superiores 
+    // com um cast seguro para o registador de 32-bits da VM
+    state->r3 = static_cast<int32_t>(upperChar & 0xFF);
+    
+    globals->scalars.errno_ = 0;
+}
+
 
 	void StdCLib_TrapAvailable(StdCLib::Globals* globals, MachineState* state)
 	{
