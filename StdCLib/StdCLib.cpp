@@ -821,7 +821,11 @@ extern "C"
 
 	void StdCLib__coRead(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Força a leitura a partir do descritor 0 (stdin)
+		uint32_t originalR3 = state->r3;
+		state->r3 = 0; 
+		StdCLib_read(globals, state);
+		if (state->r3 == -1) state->r3 = originalR3; // Recuperação parcial em falha
 	}
 
 	void StdCLib__coreIOExit(StdCLib::Globals* globals, MachineState* state)
@@ -831,7 +835,9 @@ extern "C"
 
 	void StdCLib__coWrite(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Força a escrita para o descritor 1 (stdout)
+		state->r3 = 1; 
+		StdCLib_write(globals, state);
 	}
 
 	void StdCLib__cvt(StdCLib::Globals* globals, MachineState* state)
@@ -977,7 +983,8 @@ extern "C"
 
 	void StdCLib__fsRead(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Encaminha diretamente para a implementação POSIX nativa segura
+		StdCLib_read(globals, state);
 	}
 
 	void StdCLib__FSSpec2Path(StdCLib::Globals* globals, MachineState* state)
@@ -987,7 +994,8 @@ extern "C"
 
 	void StdCLib__fsWrite(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Encaminha diretamente para a implementação POSIX nativa segura
+		StdCLib_write(globals, state);
 	}
 
 	void StdCLib__GetAliasInfo(StdCLib::Globals* globals, MachineState* state)
@@ -1067,12 +1075,14 @@ extern "C"
 
 	void StdCLib__syRead(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Encaminha diretamente para a implementação POSIX nativa segura
+		StdCLib_read(globals, state);
 	}
 
 	void StdCLib__syWrite(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Encaminha diretamente para a implementação POSIX nativa segura
+		StdCLib_write(globals, state);
 	}
 
 	void StdCLib__uerror(StdCLib::Globals* globals, MachineState* state)
@@ -1097,7 +1107,8 @@ extern "C"
 
 	void StdCLib_abs(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int32_t val = static_cast<int32_t>(state->r3);
+		state->r3 = static_cast<int32_t>(std::abs(val));
 	}
 
 	void StdCLib_access(StdCLib::Globals* globals, MachineState* state)
@@ -1168,22 +1179,42 @@ extern "C"
 
 	void StdCLib_atof(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		
+		if (str == nullptr)
+		{
+			state->fpr[1] = 0.0;
+			return;
+		}
+
+		state->fpr[1] = std::atof(str);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_atoi(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		state->r3 = (str != nullptr) ? static_cast<int32_t>(std::atoi(str)) : 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_atol(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		state->r3 = (str != nullptr) ? static_cast<int32_t>(std::atol(str)) : 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_atoll(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		if (str == nullptr) { state->r3 = 0; state->r4 = 0; return; }
+
+		long long result = std::atoll(str);
+		uint64_t ures = static_cast<uint64_t>(result);
+		state->r3 = static_cast<uint32_t>(ures >> 32);
+		state->r4 = static_cast<uint32_t>(ures & 0xFFFFFFFF);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_binhex(StdCLib::Globals* globals, MachineState* state)
@@ -2048,9 +2079,10 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 		throw PPCVM::NotImplementedException(__func__);
 	}
 
-	void StdCLib_labs(StdCLib::Globals* globals, MachineState* state)
+	oid StdCLib_labs(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int32_t val = static_cast<int32_t>(state->r3);
+		state->r3 = static_cast<int32_t>(std::labs(val));
 	}
 
 	void StdCLib_ldiv(StdCLib::Globals* globals, MachineState* state)
@@ -2060,7 +2092,15 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_llabs(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// O valor de entrada de 64-bits está distribuído em r3 (high) e r4 (low)
+		uint64_t uval = (static_cast<uint64_t>(state->r3) << 32) | state->r4;
+		long long val = static_cast<long long>(uval);
+		
+		long long result = std::llabs(val);
+		uint64_t ures = static_cast<uint64_t>(result);
+		
+		state->r3 = static_cast<uint32_t>(ures >> 32);
+		state->r4 = static_cast<uint32_t>(ures & 0xFFFFFFFF);
 	}
 
 	void StdCLib_lldiv(StdCLib::Globals* globals, MachineState* state)
@@ -2637,7 +2677,37 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_read(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+		void* buf = ToPointer<void>(state->r4);
+		uint32_t count = static_cast<uint32_t>(state->r5);
+
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1;
+			return;
+		}
+
+		if (buf == nullptr && count > 0)
+		{
+			globals->scalars.errno_ = EFAULT;
+			state->r3 = -1;
+			return;
+		}
+
+		// Executa a leitura nativa no host
+		ssize_t result = ::read(fd, buf, count);
+
+		if (result < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = static_cast<int32_t>(result); // Devolve o número de bytes lidos
+		}
 	}
 
 	oid StdCLib_realloc(StdCLib::Globals* globals, MachineState* state)
@@ -3205,10 +3275,34 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strtod(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		uint32_t p_endptr = state->r4;
+
+		if (str == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->fpr[1] = 0.0;
+			return;
+		}
+
+		char* hostEndPtr = nullptr;
+		double result = std::strtod(str, &hostEndPtr);
+
+		if (p_endptr != 0)
+		{
+			uint32_t* endptr = ToPointer<uint32_t>(p_endptr);
+			if (endptr)
+			{
+				uint32_t offset = static_cast<uint32_t>(hostEndPtr - str);
+				*endptr = Common::CF::HostToBig<uint32_t>::Swap(state->r3 + offset);
+			}
+		}
+
+		state->fpr[1] = result; // Devolve o double no FPR1
+		globals->scalars.errno_ = errno;
 	}
 
-		void StdCLib_strtok(StdCLib::Globals* globals, MachineState* state)
+	void StdCLib_strtok(StdCLib::Globals* globals, MachineState* state)
 	{
 		uint32_t p_str = state->r3;
 		const char* delim = ToPointer<const char>(state->r4);
@@ -3264,22 +3358,127 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strtol(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		uint32_t p_endptr = state->r4;
+		int base = static_cast<int>(state->r5);
+
+		if (str == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		char* hostEndPtr = nullptr;
+		long result = std::strtol(str, &hostEndPtr, base);
+
+		if (p_endptr != 0)
+		{
+			uint32_t* endptr = ToPointer<uint32_t>(p_endptr);
+			if (endptr)
+			{
+				// Calcula o offset percorrido no host e replica no endereço virtual da VM
+				uint32_t offset = static_cast<uint32_t>(hostEndPtr - str);
+				*endptr = Common::CF::HostToBig<uint32_t>::Swap(state->r3 + offset);
+			}
+		}
+
+		state->r3 = static_cast<int32_t>(result);
+		globals->scalars.errno_ = errno;
 	}
 
 	void StdCLib_strtoll(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		uint32_t p_endptr = state->r4;
+		int base = static_cast<int>(state->r5);
+
+		if (str == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0; state->r4 = 0;
+			return;
+		}
+
+		char* hostEndPtr = nullptr;
+		long long result = std::strtoll(str, &hostEndPtr, base);
+
+		if (p_endptr != 0)
+		{
+			uint32_t* endptr = ToPointer<uint32_t>(p_endptr);
+			if (endptr)
+			{
+				uint32_t offset = static_cast<uint32_t>(hostEndPtr - str);
+				*endptr = Common::CF::HostToBig<uint32_t>::Swap(state->r3 + offset);
+			}
+		}
+
+		// Na ABI PowerPC de 32-bits, um int64_t é devolvido dividido em r3 (high) e r4 (low)
+		uint64_t ures = static_cast<uint64_t>(result);
+		state->r3 = static_cast<uint32_t>(ures >> 32);
+		state->r4 = static_cast<uint32_t>(ures & 0xFFFFFFFF);
+		globals->scalars.errno_ = errno;
 	}
 
-	void StdCLib_strtoul(StdCLib::Globals* globals, MachineState* state)
+    void StdCLib_strtoul(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		uint32_t p_endptr = state->r4;
+		int base = static_cast<int>(state->r5);
+
+		if (str == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		char* hostEndPtr = nullptr;
+		unsigned long result = std::strtoul(str, &hostEndPtr, base);
+
+		if (p_endptr != 0)
+		{
+			uint32_t* endptr = ToPointer<uint32_t>(p_endptr);
+			if (endptr)
+			{
+				uint32_t offset = static_cast<uint32_t>(hostEndPtr - str);
+				*endptr = Common::CF::HostToBig<uint32_t>::Swap(state->r3 + offset);
+			}
+		}
+
+		state->r3 = static_cast<uint32_t>(result);
+		globals->scalars.errno_ = errno;
 	}
 
-	void StdCLib_strtoull(StdCLib::Globals* globals, MachineState* state)
+    void StdCLib_strtoull(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* str = ToPointer<const char>(state->r3);
+		uint32_t p_endptr = state->r4;
+		int base = static_cast<int>(state->r5);
+
+		if (str == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0; state->r4 = 0;
+			return;
+		}
+
+		char* hostEndPtr = nullptr;
+		unsigned long long result = std::strtoull(str, &hostEndPtr, base);
+
+		if (p_endptr != 0)
+		{
+			uint32_t* endptr = ToPointer<uint32_t>(p_endptr);
+			if (endptr)
+			{
+				uint32_t offset = static_cast<uint32_t>(hostEndPtr - str);
+				*endptr = Common::CF::HostToBig<uint32_t>::Swap(state->r3 + offset);
+			}
+		}
+
+		state->r3 = static_cast<uint32_t>(result >> 32);
+		state->r4 = static_cast<uint32_t>(result & 0xFFFFFFFF);
+		globals->scalars.errno_ = errno;
 	}
 
 	void StdCLib_strxfrm(StdCLib::Globals* globals, MachineState* state)
@@ -3460,6 +3659,36 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_write(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+		const void* buf = ToPointer<const void>(state->r4);
+		uint32_t count = static_cast<uint32_t>(state->r5);
+
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1;
+			return;
+		}
+
+		if (buf == nullptr && count > 0)
+		{
+			globals->scalars.errno_ = EFAULT;
+			state->r3 = -1;
+			return;
+		}
+
+		// Executa a escrita nativa no host
+		ssize_t result = ::write(fd, buf, count);
+
+		if (result < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = static_cast<int32_t>(result); // Devolve o número de bytes escritos
+		}
 	}
 }
