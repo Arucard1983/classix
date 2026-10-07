@@ -2019,65 +2019,92 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 		throw PPCVM::NotImplementedException(__func__);
 	}
 
-	void StdCLib_isalnum(StdCLib::Globals* globals, MachineState* state)
+    	void StdCLib_isalnum(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & (_UPP | _LOW | _DIG)) ? 1 : 0;
 	}
 
 	void StdCLib_isalpha(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & (_UPP | _LOW)) ? 1 : 0;
 	}
 
 	void StdCLib_isascii(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// A norma clássica dita: verdadeiro se o valor estiver entre 0 e 127
+		uint32_t val = state->r3;
+		state->r3 = (val <= 0x7F) ? 1 : 0;
 	}
 
 	void StdCLib_iscntrl(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & _CTL) ? 1 : 0;
 	}
 
 	void StdCLib_isdigit(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & _DIG) ? 1 : 0;
 	}
 
 	void StdCLib_isgraph(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		// Gráficos: qualquer carácter imprimível exceto o espaço em branco puro (_BLA)
+		state->r3 = (flags & (_PUN | _UPP | _LOW | _DIG)) ? 1 : 0;
 	}
 
 	void StdCLib_islower(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & _LOW) ? 1 : 0;
 	}
 
 	void StdCLib_isprint(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		// Imprimíveis: caracteres gráficos mais o carácter de espaço em branco real (_BLA)
+		state->r3 = (flags & (_PUN | _UPP | _LOW | _DIG | _BLA)) ? 1 : 0;
 	}
 
 	void StdCLib_ispunct(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & _PUN) ? 1 : 0;
 	}
 
 	void StdCLib_isspace(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & _WSP) ? 1 : 0;
 	}
 
 	void StdCLib_isupper(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & _UPP) ? 1 : 0;
 	}
 
 	void StdCLib_isxdigit(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int ch = static_cast<int>(state->r3 & 0xFF);
+		uint8_t flags = globals->scalars.cType[ch];
+		state->r3 = (flags & _HEX) ? 1 : 0;
 	}
+
 
 	oid StdCLib_labs(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -3527,8 +3554,10 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_toascii(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Trunca o valor mantendo estritamente apenas os 7 bits inferiores ASCII
+		state->r3 = static_cast<int32_t>(state->r3 & 0x7F);
 	}
+
 
 	void StdCLib_tolower(StdCLib::Globals* globals, MachineState* state)
 {
