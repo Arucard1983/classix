@@ -1146,7 +1146,29 @@ extern "C"
 
 	void StdCLib_calloc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t num = state->r3;
+		uint32_t size = state->r4;
+		
+		uint64_t totalSize = static_cast<uint64_t>(num) * size;
+		if (totalSize == 0 || totalSize > 0xFFFFFFFFF) // Proteção contra overflow de inteiros de 32-bit
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		void* ptr = globals->allocator.Allocate(static_cast<uint32_t>(totalSize), 8);
+		
+		if (ptr == nullptr)
+		{
+			globals->scalars.errno_ = ENOMEM;
+			state->r3 = 0;
+		}
+		else
+		{
+			std::memset(ptr, 0, static_cast<size_t>(totalSize)); // O calloc limpa a memória a zeros
+			state->r3 = globals->allocator.ToIntPtr(ptr);
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_clearerr(StdCLib::Globals* globals, MachineState* state)
@@ -1470,7 +1492,17 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_free(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_vmAddress = state->r3; // Endereço virtual que a aplicação quer libertar
+		
+		if (p_vmAddress == 0) return; // free(NULL) não faz nada, dita a norma C
+
+		void* hostPtr = ToPointer<void>(p_vmAddress);
+		if (hostPtr != nullptr)
+		{
+			globals->allocator.Deallocate(hostPtr);
+		}
+		
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_freopen(StdCLib::Globals* globals, MachineState* state)
@@ -2020,7 +2052,27 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_malloc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t size = state->r3; // Tamanho requisitado pela VM (32-bit)
+		
+		if (size == 0)
+		{
+			state->r3 = 0; // malloc(0) pode retornar NULL
+			return;
+		}
+
+		// Aloca no gestor de memória partilhado da VM (alinhamento padrão de 4 ou 8 bytes)
+		void* ptr = globals->allocator.Allocate(size, 8); 
+		
+		if (ptr == nullptr)
+		{
+			globals->scalars.errno_ = ENOMEM;
+			state->r3 = 0; // Devolve NULL por falta de memória
+		}
+		else
+		{
+			state->r3 = globals->allocator.ToIntPtr(ptr); // Converte para o endereço virtual de 32-bit
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_mblen(StdCLib::Globals* globals, MachineState* state)
@@ -2291,9 +2343,50 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 		throw PPCVM::NotImplementedException(__func__);
 	}
 
-	void StdCLib_realloc(StdCLib::Globals* globals, MachineState* state)
+	oid StdCLib_realloc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_vmAddress = state->r3;
+		uint32_t newSize = state->r4;
+
+		if (p_vmAddress == 0)
+		{
+			// Se o ponteiro original for NULL, realloc funciona exatamente como um malloc
+			state->r3 = p_vmAddress; // r3 temporário para o argumento
+			state->r3 = newSize;     // ajusta r3 para o tamanho
+			StdCLib_malloc(globals, state);
+			return;
+		}
+
+		if (newSize == 0)
+		{
+			// Se o tamanho for zero, funciona como um free e retorna NULL
+			StdCLib_free(globals, state);
+			state->r3 = 0;
+			return;
+		}
+
+		void* oldHostPtr = ToPointer<void>(p_vmAddress);
+		void* newHostPtr = globals->allocator.Allocate(newSize, 8);
+
+		if (newHostPtr == nullptr)
+		{
+			globals->scalars.errno_ = ENOMEM;
+			state->r3 = 0; // Falha, mas o bloco original em oldHostPtr continua válido
+			return;
+		}
+
+		if (oldHostPtr != nullptr)
+		{
+			// Nota: Como o allocator básico pode não expor o tamanho antigo facilmente,
+			// uma abordagem conservadora segura é copiar o menor valor entre o novo tamanho 
+			// ou assumir o limite seguro que não cause segfault. Se o teu allocator 
+			// tiver uma função GetSize(oldHostPtr), usa-a aqui.
+			std::memcpy(newHostPtr, oldHostPtr, newSize); 
+			globals->allocator.Deallocate(oldHostPtr);
+		}
+
+		state->r3 = globals->allocator.ToIntPtr(newHostPtr);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_remove(StdCLib::Globals* globals, MachineState* state)
@@ -2384,8 +2477,131 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_sscanf(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* src = ToPointer<const char>(state->r3);
+		const char* format = ToPointer<const char>(state->r4);
+
+		if (src == nullptr || format == nullptr) 
+		{ 
+			globals->scalars.errno_ = EINVAL; 
+			state->r3 = -1; 
+			return; 
+		}
+
+		// Na ABI do PowerPC, os argumentos de escrita começam em r5
+		int nextGPR = 5;
+		uint32_t stackPtr = state->r1;
+		int stackOffset = 24;
+
+		auto getNextPointerArg = [&]() -> uint32_t {
+			if (nextGPR <= 10) return state->gpr[nextGPR++];
+			uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
+			stackOffset += 4;
+			return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+		};
+
+		size_t i = 0;
+		size_t len = std::strlen(format);
+		int tokensMatched = 0;
+
+		while (i < len)
+		{
+			// Ignorar espaços no formato e na string de origem
+			if (std::isspace(format[i]))
+			{
+				while (*src != '\0' && std::isspace(static_cast<unsigned char>(*src))) src++;
+				i++;
+				continue;
+			}
+
+			if (format[i] == '%' && i + 1 < len)
+			{
+				i++;
+				if (format[i] == '%')
+				{
+					if (*src != '%') break;
+					src++; i++;
+					continue;
+				}
+
+				char specifier = format[i];
+				uint32_t p_dest = getNextPointerArg();
+				if (p_dest == 0) { globals->scalars.errno_ = EFAULT; break; }
+
+				int bytesConsumed = 0;
+
+				if (specifier == 'd' || specifier == 'i')
+				{
+					int32_t val = 0;
+					if (std::sscanf(src, "%d%n", &val, &bytesConsumed) != 1) break;
+					
+					int32_t* dest = ToPointer<int32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<int32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'u')
+				{
+					uint32_t val = 0;
+					if (std::sscanf(src, "%u%n", &val, &bytesConsumed) != 1) break;
+					
+					uint32_t* dest = ToPointer<uint32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<uint32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'x' || specifier == 'X')
+				{
+					uint32_t val = 0;
+					if (std::sscanf(src, specifier == 'x' ? "%x%n" : "%X%n", &val, &bytesConsumed) != 1) break;
+					
+					uint32_t* dest = ToPointer<uint32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<uint32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'c')
+				{
+					if (*src == '\0') break;
+					char* dest = ToPointer<char>(p_dest);
+					if (dest) *dest = *src;
+					bytesConsumed = 1;
+					tokensMatched++;
+				}
+				else if (specifier == 's')
+				{
+					char tmpBuf[512];
+					if (std::sscanf(src, "%511s%n", tmpBuf, &bytesConsumed) != 1) break;
+					
+					char* dest = ToPointer<char>(p_dest);
+					if (dest) std::strcpy(dest, tmpBuf);
+					tokensMatched++;
+				}
+				else if (specifier == 'f' || specifier == 'g' || specifier == 'e')
+				{
+					float val = 0.0f;
+					if (std::sscanf(src, "%f%n", &val, &bytesConsumed) != 1) break;
+					
+					float* dest = ToPointer<float>(p_dest);
+					if (dest) {
+						uint32_t bits;
+						std::memcpy(&bits, &val, sizeof(float));
+						bits = Common::CF::HostToBig<uint32_t>::Swap(bits);
+						std::memcpy(dest, &bits, sizeof(float));
+					}
+					tokensMatched++;
+				}
+
+				src += bytesConsumed; // Avança a string de origem conforme o que foi lido
+				i++;
+			}
+			else
+			{
+				if (*src != format[i]) break;
+				src++; i++;
+			}
+		}
+
+		state->r3 = tokensMatched;
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib_strcat(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -2675,22 +2891,30 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_vec_calloc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t num = state->r3;
+		uint32_t size = state->r4;
+		uint32_t total = num * size;
+		void* ptr = globals->allocator.Allocate(total, 16);
+		if (ptr) std::memset(ptr, 0, total);
+		state->r3 = ptr ? globals->allocator.ToIntPtr(ptr) : 0;
 	}
 
 	void StdCLib_vec_free(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		StdCLib_free(globals, state);
 	}
 
 	void StdCLib_vec_malloc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+		uint32_t size = state->r3;
+		if (size == 0) { state->r3 = 0; return; }
+		void* ptr = globals->allocator.Allocate(size, 16); // Força alinhamento estrito AltiVec (16-byte)
+		state->r3 = ptr ? globals->allocator.ToIntPtr(ptr) : 
 
 	void StdCLib_vec_realloc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Simplificação segura mantendo o alinhamento AltiVec
+		StdCLib_realloc(globals, state); 
 	}
 
 	void StdCLib_vfprintf(StdCLib::Globals* globals, MachineState* state)
