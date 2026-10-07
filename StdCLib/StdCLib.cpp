@@ -665,12 +665,26 @@ extern "C"
 	
 	void StdCLib___abort(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		std::fprintf(stderr, "[ClassiX] FATAL: Guest Application called abort().\n");
+		std::fflush(stderr);
+		std::raise(SIGABRT);
 	}
 
 	void StdCLib___assertprint(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na MSL clássica, __assertprint recebe tipicamente:
+		// r3 = expressão textual, r4 = nome do ficheiro fonte, r5 = número da linha
+		const char* expression = ToPointer<const char>(state->r3);
+		const char* filename = ToPointer<const char>(state->r4);
+		uint32_t line = state->r5;
+
+		std::fprintf(stderr, "[ClassiX] Assertion failed: %s, on file %s, line %u\n",
+			expression ? expression : "unknown",
+			filename ? filename : "unknown",
+			line);
+		std::fflush(stderr);
+
+		std::raise(SIGABRT); // Aborta a execução de forma controlada
 	}
 
 	void StdCLib___DebugMallocHeap(StdCLib::Globals* globals, MachineState* state)
@@ -680,27 +694,36 @@ extern "C"
 
 	void StdCLib___GetTrapType(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No Mac OS Clássico, determina se um número de trap (em r3) é ToolBox (1) ou OS (0)
+		uint32_t trapNum = state->r3;
+		state->r3 = (trapNum & 0x0800) ? 1 : 0;
 	}
 
 	void StdCLib___growFileTable(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No Mac OS clássico, expandia o limite físico da tabela de ficheiros abertos.
+		// Como usamos NFILE estrito (40) e o mapa nativo do host lida com alocação dinâmica,
+		// definimos apenas o sucesso (0) ou reportamos que o limite estático já cobre as necessidades.
+		state->r3 = 0; 
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib___NumToolboxTraps(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Retorna o número padrão de traps da Toolbox suportados pela arquitetura clássica (tipicamente 0x400)
+		state->r3 = 0x0400;
 	}
 
 	void StdCLib___RestoreInitialCFragWorld(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No-op: O ambiente do host já gerencia o isolamento de fragmentos dinâmicos de forma nativa
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib___RevertCFragWorld(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No-op: Restauro de contexto simulado com sucesso por cortesia à aplicação emulada
+		globals->scalars.errno_ = 0;
 	}
 	
 	void StdCLib___setjmp(StdCLib::Globals* globals, MachineState* state)
@@ -785,7 +808,8 @@ extern "C"
 	void StdCLib__BreakPoint(StdCLib::Globals* globals, MachineState* state)
 	{
 		const char* reason = ToPointer<char>(state->r3);
-                printf("[ClassiX] Interrupted by %s\n", reason ? reason : "unknown");
+		std::fprintf(stderr, "[ClassiX] Interrupted by breakpoint: %s\n", reason ? reason : "unknown reason.");
+		std::fflush(stderr);
 		std::raise(SIGTRAP);
 	}
 
@@ -1035,12 +1059,16 @@ extern "C"
 
 	void StdCLib__RTExit(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Finalização de Runtime Clássico: executa passos nulos de limpeza com sucesso
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__RTInit(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Inicialização de Runtime Clássico: reporta sucesso imediato (0) para o fluxo prosseguir
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__SA_DeletePtr(StdCLib::Globals* globals, MachineState* state)
@@ -1087,7 +1115,9 @@ extern "C"
 
 	void StdCLib__uerror(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// O _uerror da MSL define o errno interno com base no valor enviado em r3
+		int32_t errorValue = static_cast<int32_t>(state->r3);
+		globals->scalars.errno_ = static_cast<uint32_t>(errorValue);
 	}
 
 	void StdCLib__wrtchk(StdCLib::Globals* globals, MachineState* state)
@@ -2554,7 +2584,22 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_perror(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* prefix = ToPointer<const char>(state->r3);
+		int currentErrno = static_cast<int>(globals->scalars.errno_);
+
+		// Mapeia temporariamente para o errno do host para usar a mensagem canónica do std::perror
+		int oldHostErrno = errno;
+		errno = currentErrno;
+
+		if (prefix && std::strlen(prefix) > 0)
+		{
+			std::fprintf(stderr, "%s: ", prefix);
+		}
+		
+		std::perror("");
+		std::fflush(stderr);
+
+		errno = oldHostErrno; // Restaura o errno original do host
 	}
 
 	void StdCLib_PLpos(StdCLib::Globals* globals, MachineState* state)
@@ -2990,7 +3035,10 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_rand(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int result = std::rand();
+		// Garante que o retorno está no intervalo [0, RAND_MAX] clássico de 15 ou 31 bits
+		state->r3 = static_cast<int32_t>(result);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_read(StdCLib::Globals* globals, MachineState* state)
@@ -3121,8 +3169,40 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_setenv(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* name = ToPointer<const char>(state->r3);
+		const char* value = ToPointer<const char>(state->r4);
+		int overwrite = static_cast<int>(state->r5);
+
+		if (name == nullptr || std::strlen(name) == 0 || std::strchr(name, '=') != nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		int result = 0;
+		if (value == nullptr)
+		{
+			// Um valor nulo na biblioteca clássica atua como um unsetenv nativo
+			result = ::unsetenv(name);
+		}
+		else
+		{
+			result = ::setenv(name, value, overwrite);
+		}
+
+		if (result < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = 0; // Sucesso
+		}
 	}
+
 
 	void StdCLib_setlocale(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -3155,9 +3235,11 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 	}
 
 
-	void StdCLib_srand(StdCLib::Globals* globals, MachineState* state)
+    void StdCLib_srand(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t seed = state->r3;
+		std::srand(static_cast<unsigned int>(seed));
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_sscanf(StdCLib::Globals* globals, MachineState* state)
@@ -3806,7 +3888,31 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_system(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* command = ToPointer<const char>(state->r3);
+
+		// Se o comando for nulo, system verifica se o processador de comandos existe
+		if (command == nullptr)
+		{
+			int status = ::system(nullptr);
+			state->r3 = (status != 0) ? 1 : 0;
+			globals->scalars.errno_ = 0;
+			return;
+		}
+
+		// Executa o comando de sistema no ecossistema Host/Darling
+		int status = ::system(command);
+
+		if (status == -1)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			// Retorna o status de terminação clássico limpo
+			state->r3 = static_cast<int32_t>(status);
+		}
 	}
 
 	void StdCLib_time(StdCLib::Globals* globals, MachineState* state)
