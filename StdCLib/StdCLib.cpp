@@ -352,66 +352,194 @@ namespace StdCLib
 		virtual ~GlobalsDetails() override
 		{}
 	};
-	
-	std::string StringPrintF(const std::string& formatString, Globals& globals, const uint32_t* gpr, const double* fpr)
-	{
-		TODO("Handle vararg calls better");
-		std::string doubleTypes = "aAeEfFgG";
-		std::regex rx("%([0-9]+\\$)?(#?)(0?)(-?)( ?)(\\+?)('?)([0-9]?)(\\.[0-9]*)?[hLljtzq]*[diouxXDOUeEfFgGaAcCsSpn]");
-		std::smatch match;
-		
-		std::stringstream result;
-		std::string::const_iterator lastMatchEnd = formatString.begin();
-		std::string::const_iterator matchStart = formatString.begin();
-		while (std::regex_search(matchStart, formatString.cend(), match, rx))
-		{
-			matchStart += match.position();
-			result << std::string(lastMatchEnd, matchStart);
-			
-			char* out = nullptr;
-			const std::string& formatSpecifier = match[0].str();
-			auto reverseIter = formatSpecifier.rbegin();
-			if (*reverseIter == 's' || *reverseIter == 'S')
-			{
-				const char* pointer = globals.allocator.ToPointer<char>(*gpr);
-				asprintf(&out, formatSpecifier.c_str(), pointer);
-				gpr++;
-			}
-			else if (doubleTypes.find_first_of(*reverseIter) != std::string::npos)
-			{
-				if (*(reverseIter + 1) == 'L')
-					throw PPCVM::NotImplementedException(__func__, "Long doubles are not supported in format strings");
-				
-				asprintf(&out, formatSpecifier.c_str(), *fpr);
-				fpr++;
-			}
-			else
-			{
-				if (*(reverseIter + 1) == 'l' && *(reverseIter + 2) == 'l')
-				{
-					uint64_t argument = ((uint64_t)gpr[0] << 32) | gpr[1];
-					asprintf(&out, formatSpecifier.c_str(), argument);
-					gpr += 2;
-				}
-				else
-				{
-					asprintf(&out, formatSpecifier.c_str(), *gpr);
-					gpr++;
-				}
-			}
-			
-			result << out;
-			free(out);
-			
-			lastMatchEnd = matchStart;
-			matchStart += match.length();
-		}
-		
-		if (matchStart != formatString.end())
-			result << std::string(matchStart, formatString.end());
-		
-		return result.str();
-	}
+ std::string StringPrintF(const char* format, Globals& globals, MachineState* state, int startingGPR)
+{
+    if (format == nullptr) return "";
+
+    int nextGPR = startingGPR; 
+    int nextFPR = 1; 
+    uint32_t stackPtr = state->r1;
+    int stackOffset = 24; 
+
+    // Lambdas auxiliares para extração segura de tipos da ABI da VM
+    auto getNextArg32 = [&]() -> uint32_t {
+        if (nextGPR <= 10) return state->gpr[nextGPR++];
+        uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
+        stackOffset += 4;
+        return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+    };
+
+    auto advanceGPRSpace = [&](int words) {
+        for (int w = 0; w < words; w++) {
+            if (nextGPR <= 10) nextGPR++;
+            else stackOffset += 4;
+        }
+    };
+
+    std::string output;
+    size_t i = 0;
+    size_t len = std::strlen(format);
+
+    while (i < len)
+    {
+        if (format[i] == '%' && i + 1 < len)
+        {
+            i++; 
+            if (format[i] == '%') { output += '%'; i++; continue; }
+
+            // Ignorar flags de largura/precisão básicas para o parser simples
+            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-')) i++;
+            if (i >= len) break;
+
+            char specifier = format[i];
+            char buffer[256];
+
+            switch (specifier)
+            {
+                case 'd': case 'i':
+                    std::snprintf(buffer, sizeof(buffer), "%d", static_cast<int32_t>(getNextArg32()));
+                    output += buffer;
+                    break;
+                case 'u':
+                    std::snprintf(buffer, sizeof(buffer), "%u", getNextArg32());
+                    output += buffer;
+                    break;
+                case 'x': case 'X':
+                    std::snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", getNextArg32());
+                    output += buffer;
+                    break;
+                case 'c':
+                    output += static_cast<char>(getNextArg32() & 0xFF);
+                    break;
+                case 's': {
+                    const char* str = ToPointer<const char>(getNextArg32());
+                    output += str ? str : "(null)";
+                    break;
+                }
+                case 'p':
+                    std::snprintf(buffer, sizeof(buffer), "0x%08x", getNextArg32());
+                    output += buffer;
+                    break;
+                case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': {
+                    double val = 0.0;
+                    if (nextFPR <= 13) {
+                        val = state->fpr[nextFPR++];
+                        advanceGPRSpace(2);
+                    } else {
+                        uint32_t* slotLow = ToPointer<uint32_t>(stackPtr + stackOffset);
+                        uint32_t* slotHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
+                        if (slotLow && slotHigh) {
+                            uint64_t rawDouble = (static_cast<uint64_t>(Common::CF::BigToHost<uint32_t>::Swap(*slotLow)) << 32) | 
+                                                 Common::CF::BigToHost<uint32_t>::Swap(*slotHigh);
+                            std::memcpy(&val, &rawDouble, sizeof(double));
+                        }
+                        stackOffset += 8;
+                        advanceGPRSpace(2);
+                    }
+                    std::snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
+                    output += buffer;
+                    break;
+                }
+                default:
+                    output += '%';
+                    output += specifier;
+                    break;
+            }
+            i++;
+        }
+        else
+        {
+            output += format[i];
+            i++;
+        }
+    }
+    return output;
+ }
+
+ std::string StringPrintFFromPointer(const char* format, Globals& globals, uint32_t argPtr)
+{
+    if (format == nullptr || argPtr == 0) return "";
+
+    uint32_t currentArgPtr = argPtr;
+
+    auto getNextArg32 = [&]() -> uint32_t {
+        uint32_t* ptr = ToPointer<uint32_t>(currentArgPtr);
+        currentArgPtr += 4; // Avança 4 bytes na stack da VM
+        return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+    };
+
+    std::string output;
+    size_t i = 0;
+    size_t len = std::strlen(format);
+
+    while (i < len)
+    {
+        if (format[i] == '%' && i + 1 < len)
+        {
+            i++; 
+            if (format[i] == '%') { output += '%'; i++; continue; }
+
+            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-')) i++;
+            if (i >= len) break;
+
+            char specifier = format[i];
+            char buffer[256];
+
+            switch (specifier)
+            {
+                case 'd': case 'i':
+                    std::snprintf(buffer, sizeof(buffer), "%d", static_cast<int32_t>(getNextArg32()));
+                    output += buffer;
+                    break;
+                case 'u':
+                    std::snprintf(buffer, sizeof(buffer), "%u", getNextArg32());
+                    output += buffer;
+                    break;
+                case 'x': case 'X':
+                    std::snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", getNextArg32());
+                    output += buffer;
+                    break;
+                case 'c':
+                    output += static_cast<char>(getNextArg32() & 0xFF);
+                    break;
+                case 's': {
+                    const char* str = ToPointer<const char>(getNextArg32());
+                    output += str ? str : "(null)";
+                    break;
+                }
+                case 'p':
+                    std::snprintf(buffer, sizeof(buffer), "0x%08x", getNextArg32());
+                    output += buffer;
+                    break;
+                case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': {
+                    // Na stack de varargs crua de 32-bit do PowerPC, os doubles ocupam 8 bytes alinhados
+                    double val = 0.0;
+                    uint32_t low = getNextArg32();
+                    uint32_t high = getNextArg32();
+                    uint64_t rawDouble = (static_cast<uint64_t>(low) << 32) | high;
+                    std::memcpy(&val, &rawDouble, sizeof(double));
+                    
+                    std::snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
+                    output += buffer;
+                    break;
+                }
+                default:
+                    output += '%';
+                    output += specifier;
+                    break;
+            }
+            i++;
+        }
+        else
+        {
+            output += format[i];
+            i++;
+        }
+    }
+    return output;
+}
+
+
 }
 
 #pragma mark -
@@ -1311,188 +1439,19 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 	}
 
 	void StdCLib_fprintf(StdCLib::Globals* globals, MachineState* state)
-{
-    FILE* fptr = MakeFilePtr(globals, state->r3);
-    const char* format = ToPointer<const char>(state->r4);
-    
-    if (fptr == nullptr || format == nullptr)
-    {
-        globals->scalars.errno_ = EINVAL;
-        state->r3 = -1;
-        return;
-    }
+	{
+		FILE* fptr = MakeFilePtr(globals, state->r3);
+		const char* format = ToPointer<const char>(state->r4);
+		if (fptr == nullptr || format == nullptr) { globals->scalars.errno_ = EINVAL; state->r3 = -1; return; }
 
-    // Índices estáveis para controlar os argumentos na ABI do PowerPC ao longo de toda a string
-    int nextGPR = 5; 
-    int nextFPR = 1; // ESCOPO CORRIGIDO: Declarado aqui no topo
-    
-    uint32_t stackPtr = state->r1;
-    int stackOffset = 24; 
+		// Ficheiro em r3, formato em r4, logo os argumentos começam em r5
+		std::string output = StringPrintF(format, *globals, state, 5);
 
-    // Lambda auxiliar para ler o próximo inteiro de 32 bits da ABI da VM
-    auto getNextArg32 = [&]() -> uint32_t {
-        if (nextGPR <= 10)
-        {
-            return state->gpr[nextGPR++];
-        }
-        else
-        {
-            uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
-            stackOffset += 4;
-            return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
-        }
-    };
-
-    // Lambda auxiliar para queimar espaço na stack geral de argumentos (shadowing da ABI PowerPC)
-    auto advanceGPRSpace = [&](int words) {
-        for (int w = 0; w < words; w++) {
-            if (nextGPR <= 10) {
-                nextGPR++;
-            } else {
-                stackOffset += 4;
-            }
-        }
-    };
-
-    std::string output;
-    size_t i = 0;
-    size_t len = strlen(format);
-    int charactersWritten = 0;
-
-    while (i < len)
-    {
-        if (format[i] == '%' && i + 1 < len)
-        {
-            i++; 
-            
-            if (format[i] == '%')
-            {
-                output += '%';
-                i++;
-                continue;
-            }
-
-            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-'))
-            {
-                i++; 
-            }
-
-            if (i >= len) break;
-
-            char specifier = format[i];
-            char buffer[256];
-
-            switch (specifier)
-            {
-                case 'd':
-                case 'i':
-                {
-                    int32_t val = static_cast<int32_t>(getNextArg32());
-                    snprintf(buffer, sizeof(buffer), "%d", val);
-                    output += buffer;
-                    break;
-                }
-                case 'u':
-                {
-                    uint32_t val = getNextArg32();
-                    snprintf(buffer, sizeof(buffer), "%u", val);
-                    output += buffer;
-                    break;
-                }
-                case 'x':
-                case 'X':
-                {
-                    uint32_t val = getNextArg32();
-                    snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", val);
-                    output += buffer;
-                    break;
-                }
-                case 'c':
-                {
-                    char val = static_cast<char>(getNextArg32() & 0xFF);
-                    output += val;
-                    break;
-                }
-                case 's':
-                {
-                    uint32_t p_str = getNextArg32();
-                    const char* str = ToPointer<const char>(p_str);
-                    if (str) output += str;
-                    else output += "(null)";
-                    break;
-                }
-                case 'p':
-                {
-                    uint32_t val = getNextArg32();
-                    snprintf(buffer, sizeof(buffer), "0x%08x", val);
-                    output += buffer;
-                    break;
-                }
-                case 'f':
-                case 'F':
-                case 'g':
-                case 'G':
-                case 'e':
-                case 'E':
-                {
-                    double val = 0.0;
-                    if (nextFPR <= 13)
-                    {
-                        val = state->fpr[nextFPR++];
-                        // REGRA DA ABI: Um double queima 2 palavras (8 bytes) de espaço nos registadores gerais
-                        advanceGPRSpace(2);
-                    }
-                    else
-                    {
-                        uint64_t rawDouble = 0;
-                        uint32_t* slotLow = ToPointer<uint32_t>(stackPtr + stackOffset);
-                        uint32_t* slotHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
-            
-                        if (slotLow && slotHigh)
-                        {
-                            uint32_t low = Common::CF::BigToHost<uint32_t>::Swap(*slotLow);
-                            uint32_t high = Common::CF::BigToHost<uint32_t>::Swap(*slotHigh);
-                
-                            rawDouble = (static_cast<uint64_t>(low) << 32) | high;
-                            std::memcpy(&val, &rawDouble, sizeof(double));
-                        }
-                        stackOffset += 8;
-                        // Como lemos da stack diretamente via offset dedicado, sincronizamos a contagem de GPRs
-                        advanceGPRSpace(2);
-                    }
-        
-                    snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
-                    output += buffer;
-                    break;
-                }
-                default:
-                    output += '%';
-                    output += specifier;
-                    break;
-            }
-            i++;
-        }
-        else
-        {
-            output += format[i];
-            i++;
-        }
-    }
-
-    charactersWritten = fputs(output.c_str(), fptr);
-    
-    if (charactersWritten >= 0)
-    {
-        state->r3 = static_cast<int32_t>(output.size());
-        globals->scalars.errno_ = 0;
-    }
-    else
-    {
-        state->r3 = -1;
-        globals->scalars.errno_ = errno;
-    }
-}
-
+		int charactersWritten = fputs(output.c_str(), fptr);
+		
+		if (charactersWritten >= 0) { state->r3 = static_cast<int32_t>(output.size()); globals->scalars.errno_ = 0; }
+		else { state->r3 = -1; globals->scalars.errno_ = errno; }
+	}
 
 	void StdCLib_fputc(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1521,8 +1480,149 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_fscanf(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		FILE* fptr = MakeFilePtr(globals, state->r3);
+		const char* format = ToPointer<const char>(state->r4);
+
+		if (fptr == nullptr || format == nullptr) 
+		{ 
+			globals->scalars.errno_ = EINVAL; 
+			state->r3 = -1; 
+			return; 
+		}
+
+		// Argumentos variáveis começam no r5 na ABI do PowerPC
+		int nextGPR = 5;
+		uint32_t stackPtr = state->r1;
+		int stackOffset = 24;
+
+		auto getNextPointerArg = [&]() -> uint32_t {
+			if (nextGPR <= 10) return state->gpr[nextGPR++];
+			uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
+			stackOffset += 4;
+			return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+		};
+
+		size_t i = 0;
+		size_t len = std::strlen(format);
+		int tokensMatched = 0;
+
+		while (i < len)
+		{
+			// Consumir espaços em branco no formato
+			if (std::isspace(format[i]))
+			{
+				int ch;
+				while ((ch = std::fgetc(fptr)) != EOF && std::isspace(ch));
+				if (ch != EOF) std::ungetc(ch, fptr);
+				i++;
+				continue;
+			}
+
+			if (format[i] == '%' && i + 1 < len)
+			{
+				i++;
+				if (format[i] == '%')
+				{
+					int ch = std::fgetc(fptr);
+					if (ch != '%') { if (ch != EOF) std::ungetc(ch, fptr); break; }
+					i++;
+					continue;
+				}
+
+				// Parser simplificado de especificadores
+				char specifier = format[i];
+				uint32_t p_dest = getNextPointerArg();
+				if (p_dest == 0) { globals->scalars.errno_ = EFAULT; break; }
+
+				if (specifier == 'd' || specifier == 'i')
+				{
+					int32_t val = 0;
+					if (std::fscanf(fptr, "%d", &val) != 1) break;
+					
+					int32_t* dest = ToPointer<int32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<int32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'u')
+				{
+					uint32_t val = 0;
+					if (std::fscanf(fptr, "%u", &val) != 1) break;
+					
+					uint32_t* dest = ToPointer<uint32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<uint32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'x' || specifier == 'X')
+				{
+					uint32_t val = 0;
+					if (std::fscanf(fptr, specifier == 'x' ? "%x" : "%X", &val) != 1) break;
+					
+					uint32_t* dest = ToPointer<uint32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<uint32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'c')
+				{
+					int ch = std::fgetc(fptr);
+					if (ch == EOF) break;
+					
+					char* dest = ToPointer<char>(p_dest);
+					if (dest) *dest = static_cast<char>(ch);
+					tokensMatched++;
+				}
+				else if (specifier == 's')
+				{
+					// Lemos uma palavra respeitando o limite seguro do buffer simulado
+					char tmpBuf[512];
+					if (std::fscanf(fptr, "%511s", tmpBuf) != 1) break;
+					
+					char* dest = ToPointer<char>(p_dest);
+					if (dest) std::strcpy(dest, tmpBuf); // Escreve na VM
+					tokensMatched++;
+				}
+				else if (specifier == 'f' || specifier == 'g' || specifier == 'e')
+				{
+					float val = 0.0f;
+					if (std::fscanf(fptr, "%f", &val) != 1) break;
+					
+					// Converte o float para o formato correto SwappedFloat32/BigEndian
+					// Se a tua VM usar SwappedFloat32, aplica a conversão aqui:
+					float* dest = ToPointer<float>(p_dest);
+					if (dest) {
+						// Exemplo assumindo união de bits simples para endianness de floats
+						uint32_t bits;
+						std::memcpy(&bits, &val, sizeof(float));
+						bits = Common::CF::HostToBig<uint32_t>::Swap(bits);
+						std::memcpy(dest, &bits, sizeof(float));
+					}
+					tokensMatched++;
+				}
+				i++;
+			}
+			else
+			{
+				int ch = std::fgetc(fptr);
+				if (ch != format[i])
+				{
+					if (ch != EOF) std::ungetc(ch, fptr);
+					break; // Incompatibilidade no pattern matching
+				}
+				i++;
+			}
+		}
+
+		// Retorna o número de tokens correspondidos com sucesso, ou EOF se falhar antes de qualquer conversão
+		if (tokensMatched == 0 && std::feof(fptr)) 
+		{
+			state->r3 = -1; // EOF
+		}
+		else 
+		{
+			state->r3 = tokensMatched;
+		}
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib_fseek(StdCLib::Globals* globals, MachineState* state)
 {
@@ -2107,187 +2207,18 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 	}
 
 	void StdCLib_printf(StdCLib::Globals* globals, MachineState* state)
-{
-    // O r3 contém a string de formatação enviada pela VM PowerPC
-    const char* format = ToPointer<const char>(state->r3);
-    
-    if (format == nullptr)
-    {
-        globals->scalars.errno_ = EINVAL;
-        state->r3 = -1;
-        return;
-    }
+	{
+		const char* format = ToPointer<const char>(state->r3);
+		if (format == nullptr) { globals->scalars.errno_ = EINVAL; state->r3 = -1; return; }
 
-    // Índices estáveis para a ABI do PowerPC: como o formato está em r3, 
-    // os argumentos variáveis começam estritamente em r4 e r5 em diante.
-    int nextGPR = 4; 
-    int nextFPR = 1; 
-    
-    uint32_t stackPtr = state->r1;
-    int stackOffset = 24; 
+		// Na ABI PowerPC, format está em r3, logo os argumentos começam em r4
+		std::string output = StringPrintF(format, *globals, state, 4);
 
-    // Lambda auxiliar para ler inteiros de 32 bits da ABI da VM
-    auto getNextArg32 = [&]() -> uint32_t {
-        if (nextGPR <= 10)
-        {
-            return state->gpr[nextGPR++];
-        }
-        else
-        {
-            uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
-            stackOffset += 4;
-            return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
-        }
-    };
-
-    // Lambda auxiliar para shadow de argumentos flutuantes na ABI PowerPC
-    auto advanceGPRSpace = [&](int words) {
-        for (int w = 0; w < words; w++) {
-            if (nextGPR <= 10) {
-                nextGPR++;
-            } else {
-                stackOffset += 4;
-            }
-        }
-    };
-
-    std::string output;
-    size_t i = 0;
-    size_t len = strlen(format);
-
-    while (i < len)
-    {
-        if (format[i] == '%' && i + 1 < len)
-        {
-            i++; 
-            
-            if (format[i] == '%')
-            {
-                output += '%';
-                i++;
-                continue;
-            }
-
-            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-'))
-            {
-                i++; 
-            }
-
-            if (i >= len) break;
-
-            char specifier = format[i];
-            char buffer[256];
-
-            switch (specifier)
-            {
-                case 'd':
-                case 'i':
-                {
-                    int32_t val = static_cast<int32_t>(getNextArg32());
-                    std::snprintf(buffer, sizeof(buffer), "%d", val);
-                    output += buffer;
-                    break;
-                }
-                case 'u':
-                {
-                    uint32_t val = getNextArg32();
-                    std::snprintf(buffer, sizeof(buffer), "%u", val);
-                    output += buffer;
-                    break;
-                }
-                case 'x':
-                case 'X':
-                {
-                    uint32_t val = getNextArg32();
-                    std::snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", val);
-                    output += buffer;
-                    break;
-                }
-                case 'c':
-                {
-                    char val = static_cast<char>(getNextArg32() & 0xFF);
-                    output += val;
-                    break;
-                }
-                case 's':
-                {
-                    uint32_t p_str = getNextArg32();
-                    const char* str = ToPointer<const char>(p_str);
-                    if (str) output += str;
-                    else output += "(null)";
-                    break;
-                }
-                case 'p':
-                {
-                    uint32_t val = getNextArg32();
-                    std::snprintf(buffer, sizeof(buffer), "0x%08x", val);
-                    output += buffer;
-                    break;
-                }
-                case 'f':
-                case 'F':
-                case 'g':
-                case 'G':
-                case 'e':
-                case 'E':
-                {
-                    double val = 0.0;
-                    if (nextFPR <= 13)
-                    {
-                        val = state->fpr[nextFPR++];
-                        advanceGPRSpace(2);
-                    }
-                    else
-                    {
-                        uint64_t rawDouble = 0;
-                        uint32_t* slotLow = ToPointer<uint32_t>(stackPtr + stackOffset);
-                        uint32_t* slotHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
-            
-                        if (slotLow && slotHigh)
-                        {
-                            uint32_t low = Common::CF::BigToHost<uint32_t>::Swap(*slotLow);
-                            uint32_t high = Common::CF::BigToHost<uint32_t>::Swap(*slotHigh);
-                
-                            rawDouble = (static_cast<uint64_t>(low) << 32) | high;
-                            std::memcpy(&val, &rawDouble, sizeof(double));
-                        }
-                        stackOffset += 8;
-                        advanceGPRSpace(2);
-                    }
-        
-                    std::snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
-                    output += buffer;
-                    break;
-                }
-                default:
-                    output += '%';
-                    output += specifier;
-                    break;
-            }
-            i++;
-        }
-        else
-        {
-            output += format[i];
-            i++;
-        }
-    }
-
-    // Imprime a string final processada no stdout do host moderno
-    int result = std::printf("%s", output.c_str());
-    std::fflush(stdout); // Força o flush para garantir logs em tempo real no Darling
-    
-    if (result >= 0)
-    {
-        state->r3 = static_cast<int32_t>(output.size());
-        globals->scalars.errno_ = 0;
-    }
-    else
-    {
-        state->r3 = -1;
-        globals->scalars.errno_ = errno;
-    }
-}
+		int result = std::printf("%s", output.c_str());
+		std::fflush(stdout);
+		
+		if (result >= 0) { state->r3 = static_cast<int32_t>(output.size()); globals->scalars.errno_ = 0; }
+	}
 
 
 	void StdCLib_putc(StdCLib::Globals* globals, MachineState* state)
@@ -2431,183 +2362,19 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 	}
 
 	void StdCLib_sprintf(StdCLib::Globals* globals, PPCVM::MachineState* state)
-{
-    // O r3 contém o endereço virtual de destino na VM onde a string final será gravada
-    uint32_t p_destBuffer = state->r3;
-    char* destBuffer = ToPointer<char>(p_destBuffer);
-    
-    // O r4 contém a string de formatação
-    const char* format = ToPointer<const char>(state->r4);
-    
-    if (destBuffer == nullptr || format == nullptr)
-    {
-        globals->scalars.errno_ = EINVAL;
-        state->r3 = -1;
-        return;
-    }
+	{
+		char* destBuffer = ToPointer<char>(state->r3);
+		const char* format = ToPointer<const char>(state->r4);
+		if (destBuffer == nullptr || format == nullptr) { globals->scalars.errno_ = EINVAL; state->r3 = -1; return; }
 
-    // Índices estáveis para a ABI do PowerPC (como o formato está em r4, argumentos começam em r5)
-    int nextGPR = 5; 
-    int nextFPR = 1; 
-    
-    uint32_t stackPtr = state->r1;
-    int stackOffset = 24; 
+		// Destino em r3, formato em r4, logo os argumentos começam em r5
+		std::string output = StringPrintF(format, *globals, state, 5);
 
-    // Lambda auxiliar para ler inteiros de 32 bits da ABI
-    auto getNextArg32 = [&]() -> uint32_t {
-        if (nextGPR <= 10)
-        {
-            return state->gpr[nextGPR++];
-        }
-        else
-        {
-            uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
-            stackOffset += 4;
-            return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
-        }
-    };
-
-    // Lambda auxiliar para shadow de argumentos flutuantes na ABI PowerPC
-    auto advanceGPRSpace = [&](int words) {
-        for (int w = 0; w < words; w++) {
-            if (nextGPR <= 10) {
-                nextGPR++;
-            } else {
-                stackOffset += 4;
-            }
-        }
-    };
-
-    std::string output;
-    size_t i = 0;
-    size_t len = strlen(format);
-
-    while (i < len)
-    {
-        if (format[i] == '%' && i + 1 < len)
-        {
-            i++; 
-            
-            if (format[i] == '%')
-            {
-                output += '%';
-                i++;
-                continue;
-            }
-
-            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-'))
-            {
-                i++; 
-            }
-
-            if (i >= len) break;
-
-            char specifier = format[i];
-            char buffer[256];
-
-            switch (specifier)
-            {
-                case 'd':
-                case 'i':
-                {
-                    int32_t val = static_cast<int32_t>(getNextArg32());
-                    snprintf(buffer, sizeof(buffer), "%d", val);
-                    output += buffer;
-                    break;
-                }
-                case 'u':
-                {
-                    uint32_t val = getNextArg32();
-                    snprintf(buffer, sizeof(buffer), "%u", val);
-                    output += buffer;
-                    break;
-                }
-                case 'x':
-                case 'X':
-                {
-                    uint32_t val = getNextArg32();
-                    snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", val);
-                    output += buffer;
-                    break;
-                }
-                case 'c':
-                {
-                    char val = static_cast<char>(getNextArg32() & 0xFF);
-                    output += val;
-                    break;
-                }
-                case 's':
-                {
-                    uint32_t p_str = getNextArg32();
-                    const char* str = ToPointer<const char>(p_str);
-                    if (str) output += str;
-                    else output += "(null)";
-                    break;
-                }
-                case 'p':
-                {
-                    uint32_t val = getNextArg32();
-                    snprintf(buffer, sizeof(buffer), "0x%08x", val);
-                    output += buffer;
-                    break;
-                }
-                case 'f':
-                case 'F':
-                case 'g':
-                case 'G':
-                case 'e':
-                case 'E':
-                {
-                    double val = 0.0;
-                    if (nextFPR <= 13)
-                    {
-                        val = state->fpr[nextFPR++];
-                        advanceGPRSpace(2);
-                    }
-                    else
-                    {
-                        uint64_t rawDouble = 0;
-                        uint32_t* slotLow = ToPointer<uint32_t>(stackPtr + stackOffset);
-                        uint32_t* slotHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
-            
-                        if (slotLow && slotHigh)
-                        {
-                            uint32_t low = Common::CF::BigToHost<uint32_t>::Swap(*slotLow);
-                            uint32_t high = Common::CF::BigToHost<uint32_t>::Swap(*slotHigh);
-                
-                            rawDouble = (static_cast<uint64_t>(low) << 32) | high;
-                            std::memcpy(&val, &rawDouble, sizeof(double));
-                        }
-                        stackOffset += 8;
-                        advanceGPRSpace(2);
-                    }
-        
-                    snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
-                    output += buffer;
-                    break;
-                }
-                default:
-                    output += '%';
-                    output += specifier;
-                    break;
-            }
-            i++;
-        }
-        else
-        {
-            output += format[i];
-            i++;
-        }
-    }
-
-    // Gravação direta na memória virtualizada da VM de 32-bits
-    // Copiamos a string processada incluindo o terminador nulo ('\0')
-    std::memcpy(destBuffer, output.c_str(), output.size() + 1);
-    
-    // Devolvemos no r3 o número de caracteres escritos (excluindo o \0), tal como dita a norma C
-    state->r3 = static_cast<int32_t>(output.size());
-    globals->scalars.errno_ = 0;
-}
+		std::memcpy(destBuffer, output.c_str(), output.size() + 1);
+		
+		state->r3 = static_cast<int32_t>(output.size());
+		globals->scalars.errno_ = 0;
+	}
 
 
 	void StdCLib_srand(StdCLib::Globals* globals, MachineState* state)
@@ -2928,8 +2695,33 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_vfprintf(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		FILE* fptr = MakeFilePtr(globals, state->r3);
+		const char* format = ToPointer<const char>(state->r4);
+		uint32_t p_vaList = state->r5; // Ponteiro virtual para a estrutura/lista va_list da VM
+
+		if (fptr == nullptr || format == nullptr) 
+		{ 
+			globals->scalars.errno_ = EINVAL; 
+			state->r3 = -1; 
+			return; 
+		}
+
+		std::string output = StringPrintFFromPointer(format, *globals, p_vaList);
+
+		int charactersWritten = fputs(output.c_str(), fptr);
+		
+		if (charactersWritten >= 0) 
+		{ 
+			state->r3 = static_cast<int32_t>(output.size()); 
+			globals->scalars.errno_ = 0; 
+		}
+		else 
+		{ 
+			state->r3 = -1; 
+			globals->scalars.errno_ = errno; 
+		}
 	}
+
 
 	void StdCLib_vprintf(StdCLib::Globals* globals, MachineState* state)
 	{
