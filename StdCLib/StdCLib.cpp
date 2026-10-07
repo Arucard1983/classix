@@ -2559,67 +2559,358 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_PLpos(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// O PLpos clássico devolve o índice (base 1) de onde a substring (r3) começa na string principal (r4).
+		// Se não encontrar, devolve 0.
+		const uint8_t* needle = ToPointer<const uint8_t>(state->r3);
+		const uint8_t* haystack = ToPointer<const uint8_t>(state->r4);
+
+		if (needle == nullptr || haystack == nullptr) { state->r3 = 0; return; }
+
+		uint32_t hLen = haystack[0];
+		uint32_t nLen = needle[0];
+
+		if (nLen == 0) { state->r3 = 1; return; }
+		if (nLen > hLen) { state->r3 = 0; return; }
+
+		for (uint32_t i = 0; i <= hLen - nLen; i++)
+		{
+			if (std::memcmp(&haystack[1 + i], &needle[1], nLen) == 0)
+			{
+				state->r3 = i + 1; // Índice baseado em 1, regra canónica Pascal
+				return;
+			}
+		}
+		state->r3 = 0;
 	}
 
 	void StdCLib_PLstrcat(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		uint8_t* dest = ToPointer<uint8_t>(p_dest);
+		const uint8_t* src = ToPointer<const uint8_t>(state->r4);
+
+		if (dest == nullptr || src == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = p_dest;
+			return;
+		}
+
+		uint32_t destLen = dest[0];
+		uint32_t srcLen = src[0];
+		
+		// O tamanho combinado não pode ultrapassar o limite físico absoluto de 255 bytes de uma Pascal String
+		uint33_t totalLen = destLen + srcLen;
+		if (totalLen > 255) totalLen = 255;
+
+		uint32_t charsToCopy = totalLen - destLen;
+
+		if (charsToCopy > 0)
+		{
+			std::memmove(&dest[1 + destLen], &src[1], charsToCopy);
+		}
+
+		dest[0] = static_cast<uint8_t>(totalLen); // Atualiza o novo tamanho
+		state->r3 = p_dest;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_PLstrchr(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+		uint32_t p_str = state->r3;
+		const uint8_t* s = ToPointer<const uint8_t>(p_str);
+		int character = state->r4 & 0xFF;
+
+		if (s == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		uint32_t length = s[0];
+		for (uint32_t i = 0; i < length; i++)
+		{
+			if (s[1 + i] == character)
+			{
+				// Retorna o ponteiro virtual exato para o carácter dentro da string Pascal
+				state->r3 = p_str + 1 + i;
+				globals->scalars.errno_ = 0;
+				return;
+			}
+		}
+
+		state->r3 = 0; // Não encontrado
+		globals->scalars.errno_ = 0;
+    }
 
 	void StdCLib_PLstrcmp(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const uint8_t* s1 = ToPointer<const uint8_t>(state->r3);
+		const uint8_t* s2 = ToPointer<const uint8_t>(state->r4);
+
+		if (s1 == nullptr || s2 == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = (s1 == nullptr) ? -1 : 1;
+			return;
+		}
+
+		uint32_t len1 = s1[0];
+		uint32_t len2 = s2[0];
+		uint32_t minLen = (len1 < len2) ? len1 : len2;
+
+		int res = std::memcmp(&s1[1], &s2[1], minLen);
+		if (res == 0)
+		{
+			if (len1 < len2) res = -1;
+			else if (len1 > len2) res = 1;
+		}
+
+		state->r3 = static_cast<int32_t>(res);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_PLstrcpy(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		uint8_t* dest = ToPointer<uint8_t>(p_dest);
+		const uint8_t* src = ToPointer<const uint8_t>(state->r4);
+
+		if (dest == nullptr || src == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			return;
+		}
+
+		uint8_t length = src[0];
+		dest[0] = length; // Copia o byte de tamanho
+		
+		// Copia os caracteres reais (estatisticamente seguro contra overlaps)
+		std::memmove(&dest[1], &src[1], length);
+
+		state->r3 = p_dest; // Retorna o endereço virtual original de destino
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_PLstrlen(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const uint8_t* s = ToPointer<const uint8_t>(state->r3);
+		
+		// O tamanho é o valor guardado estritamente no primeiro byte
+		state->r3 = s ? static_cast<uint32_t>(s[0]) : 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_PLstrncat(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		uint8_t* dest = ToPointer<uint8_t>(p_dest);
+		const uint8_t* src = ToPointer<const uint8_t>(state->r4);
+		uint32_t maxAppend = state->r5; // Máximo de bytes a anexar
+
+		if (dest == nullptr || src == nullptr || maxAppend == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = p_dest;
+			return;
+		}
+
+		uint32_t destLen = dest[0];
+		uint32_t srcLen = src[0];
+		
+		uint32_t charsToCopy = (srcLen > maxAppend) ? maxAppend : srcLen;
+		
+		uint32_t totalLen = destLen + charsToCopy;
+		if (totalLen > 255) totalLen = 255;
+
+		charsToCopy = totalLen - destLen;
+
+		if (charsToCopy > 0)
+		{
+			std::memmove(&dest[1 + destLen], &src[1], charsToCopy);
+		}
+
+		dest[0] = static_cast<uint8_t>(totalLen);
+		state->r3 = p_dest;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_PLstrncmp(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const uint8_t* s1 = ToPointer<const uint8_t>(state->r3);
+		const uint8_t* s2 = ToPointer<const uint8_t>(state->r4);
+		uint32_t count = state->r5;
+
+		if (s1 == nullptr || s2 == nullptr || count == 0)
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		uint32_t len1 = (s1[0] > count) ? count : s1[0];
+		uint32_t len2 = (s2[0] > count) ? count : s2[0];
+		uint32_t minLen = (len1 < len2) ? len1 : len2;
+
+		int res = std::memcmp(&s1[1], &s2[1], minLen);
+		if (res == 0)
+		{
+			if (len1 < len2) res = -1;
+			else if (len1 > len2) res = 1;
+		}
+
+		state->r3 = static_cast<int32_t>(res);
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib_PLstrncpy(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		uint8_t* dest = ToPointer<uint8_t>(p_dest);
+		const uint8_t* src = ToPointer<const uint8_t>(state->r4);
+		uint32_t maxSize = state->r5; // Tamanho máximo do buffer de destino (incluindo o byte de tamanho)
+
+		if (dest == nullptr || src == nullptr || maxSize == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = p_dest;
+			return;
+		}
+
+		// O número máximo de caracteres a copiar é maxSize - 1 (para dar espaço ao byte de tamanho no início)
+		uint32_t maxChars = maxSize - 1;
+		uint8_t actualLength = src[0];
+		uint8_t copyLength = (actualLength > maxChars) ? static_cast<uint8_t>(maxChars) : actualLength;
+
+		dest[0] = copyLength; // Grava o tamanho efetivo copiado
+		if (copyLength > 0)
+		{
+			std::memmove(&dest[1], &src[1], copyLength);
+		}
+
+		// A especificação clássica dita preencher o resto do buffer com zeros se sobrar espaço
+		if (maxSize > static_cast<uint32_t>(copyLength) + 1)
+		{
+			std::memset(&dest[1 + copyLength], 0, maxSize - (1 + copyLength));
+		}
+
+		state->r3 = p_dest;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_PLstrpbrk(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_s1 = state->r3;
+		const uint8_t* s1 = ToPointer<const uint8_t>(p_s1);
+		const char* s2 = ToPointer<const char>(state->r4); // O set de quebra costuma ser uma C-String padrão
+
+		if (s1 == nullptr || s2 == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		uint32_t length = s1[0];
+		size_t s2Len = std::strlen(s2);
+
+		for (uint32_t i = 0; i < length; i++)
+		{
+			for (size_t j = 0; j < s2Len; j++)
+			{
+				if (s1[1 + i] == static_cast<uint8_t>(s2[j]))
+				{
+					state->r3 = p_s1 + 1 + i;
+					return;
+				}
+			}
+		}
+		state->r3 = 0;
 	}
 
 	void StdCLib_PLstrrchr(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_str = state->r3;
+		const uint8_t* s = ToPointer<const uint8_t>(p_str);
+		int character = state->r4 & 0xFF;
+
+		if (s == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		uint32_t length = s[0];
+		// Busca reversa a partir do fim da Pascal String
+		for (uint32_t i = length; i > 0; i--)
+		{
+			if (s[i] == character)
+			{
+				state->r3 = p_str + i;
+				globals->scalars.errno_ = 0;
+				return;
+			}
+		}
+
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_PLstrspn(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Devolve quantos caracteres iniciais de s1 pertencem ao conjunto s2
+		const uint8_t* s1 = ToPointer<const uint8_t>(state->r3);
+		const char* s2 = ToPointer<const char>(state->r4);
+
+		if (s1 == nullptr || s2 == nullptr) { state->r3 = 0; return; }
+
+		uint32_t length = s1[0];
+		size_t s2Len = std::strlen(s2);
+		uint32_t count = 0;
+
+		for (uint32_t i = 0; i < length; i++)
+		{
+			bool found = false;
+			for (size_t j = 0; j < s2Len; j++)
+			{
+				if (s1[1 + i] == static_cast<uint8_t>(s2[j])) { found = true; break; }
+			}
+			if (!found) break;
+			count++;
+		}
+		state->r3 = count;
 	}
 
 	void StdCLib_PLstrstr(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_haystack = state->r3;
+		const uint8_t* haystack = ToPointer<const uint8_t>(p_haystack);
+		const uint8_t* needle = ToPointer<const uint8_t>(state->r4);
+
+		if (haystack == nullptr || needle == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		uint32_t hLen = haystack[0];
+		uint32_t nLen = needle[0];
+
+		if (nLen == 0) { state->r3 = p_haystack + 1; return; }
+		if (nLen > hLen) { state->r3 = 0; return; }
+
+		for (uint32_t i = 0; i <= hLen - nLen; i++)
+		{
+			if (std::memcmp(&haystack[1 + i], &needle[1], nLen) == 0)
+			{
+				state->r3 = p_haystack + 1 + i;
+				return;
+			}
+		}
+		state->r3 = 0;
 	}
 
 	void StdCLib_printf(StdCLib::Globals* globals, MachineState* state)
