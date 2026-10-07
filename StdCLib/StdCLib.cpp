@@ -539,7 +539,43 @@ namespace StdCLib
     return output;
 }
 
+  void FillVirtualTM(void* destPtr, const std::tm* t)
+	{
+		if (destPtr == nullptr || t == nullptr) return;
 
+		// Mapeamento direto respeitando o formato de 32-bits Big-Endian da VM
+		uint32_t* fields = reinterpret_cast<uint32_t*>(destPtr);
+		
+		fields[0] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_sec);
+		fields[1] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_min);
+		fields[2] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_hour);
+		fields[3] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_mday);
+		fields[4] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_mon);
+		fields[5] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_year);
+		fields[6] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_wday);
+		fields[7] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_yday);
+		fields[8] = Common::CF::HostToBig<uint32_t>::Swap(t->tm_isdst);
+	}
+
+	std::tm ParseVirtualTM(const void* srcPtr)
+	{
+		std::tm t = {};
+		if (srcPtr == nullptr) return t;
+
+		const uint32_t* fields = reinterpret_cast<const uint32_t*>(srcPtr);
+		
+		t.tm_sec   = Common::CF::BigToHost<uint32_t>::Swap(fields[0]);
+		t.tm_min   = Common::CF::BigToHost<uint32_t>::Swap(fields[1]);
+		t.tm_hour  = Common::CF::BigToHost<uint32_t>::Swap(fields[2]);
+		t.tm_mday  = Common::CF::BigToHost<uint32_t>::Swap(fields[3]);
+		t.tm_mon   = Common::CF::BigToHost<uint32_t>::Swap(fields[4]);
+		t.tm_year  = Common::CF::BigToHost<uint32_t>::Swap(fields[5]);
+		t.tm_wday  = Common::CF::BigToHost<uint32_t>::Swap(fields[6]);
+		t.tm_yday  = Common::CF::BigToHost<uint32_t>::Swap(fields[7]);
+		t.tm_isdst = Common::CF::BigToHost<uint32_t>::Swap(fields[8]);
+		
+		return t;
+	}
 }
 
 #pragma mark -
@@ -1071,7 +1107,23 @@ extern "C"
 
 	void StdCLib_asctime(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const void* p_virtualTM = ToPointer<const void>(state->r3);
+		if (p_virtualTM == nullptr) { state->r3 = 0; return; }
+
+		std::tm timeInfo = ParseVirtualTM(p_virtualTM);
+		char* resStr = std::asctime(&timeInfo);
+
+		if (resStr == nullptr) { state->r3 = 0; return; }
+
+		// Escrevemos o resultado na memória temporária de strings partilhada da VM
+		char* p_virtualStr = ToPointer<char>(globals->scalars.TimeData);
+		if (p_virtualStr)
+		{
+			std::strcpy(p_virtualStr, resStr);
+		}
+
+		state->r3 = globals->scalars.TimeData;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_atexit(StdCLib::Globals* globals, MachineState* state)
@@ -1178,13 +1230,43 @@ extern "C"
 
 	void StdCLib_clock(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// clock() devolve o tempo de CPU consumido pelo processo
+		std::clock_t hostTicks = std::clock();
+
+		// O Mac OS Clássico define CLOCKS_PER_SEC tipicamente como 60 (Ticks da ToolBox)
+		// ou 1000000 dependendo estritamente da conformidade POSIX da MSL.
+		// Vamos assumir o padrão POSIX do host e ajustar se vires desvios de velocidade.
+		uint32_t classicTicks = static_cast<uint32_t>(hostTicks);
+
+		state->r3 = classicTicks;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_close(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1;
+			return;
+		}
+
+		int result = ::close(fd);
+
+		if (result < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = 0; // Sucesso
+		}
 	}
+
 
 	void StdCLib_ConvertTheString(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1198,12 +1280,37 @@ extern "C"
 
 	void StdCLib_ctime(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const uint32_t* p_timer = ToPointer<const uint32_t>(state->r3);
+		if (p_timer == nullptr) { state->r3 = 0; return; }
+
+		uint32_t classicTime = Common::CF::BigToHost<uint32_t>::Swap(*p_timer);
+		std::time_t hostTime = static_cast<std::time_t>(classicTime - 2082844800ULL);
+
+		char* resStr = std::ctime(&hostTime);
+		if (resStr == nullptr) { state->r3 = 0; return; }
+
+		char* p_virtualStr = ToPointer<char>(globals->scalars.TimeData);
+		if (p_virtualStr)
+		{
+			std::strcpy(p_virtualStr, resStr);
+		}
+
+		state->r3 = globals->scalars.TimeData;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_difftime(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na ABI do PowerPC, os argumentos de vírgula flutuante (doubles)
+		// são passados nos registadores FPR1 e FPR2
+		double time1 = state->fpr[1];
+		double time2 = state->fpr[2];
+
+		double result = std::difftime(static_cast<std::time_t>(time1), static_cast<std::time_t>(time2));
+
+		// O resultado de vírgula flutuante é devolvido em FPR1
+		state->fpr[1] = result;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_div(StdCLib::Globals* globals, MachineState* state)
@@ -1852,7 +1959,23 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_gmtime(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const uint32_t* p_timer = ToPointer<const uint32_t>(state->r3);
+		if (p_timer == nullptr) { state->r3 = 0; return; }
+
+		uint32_t classicTime = Common::CF::BigToHost<uint32_t>::Swap(*p_timer);
+		// Converte de volta para época Unix se o teu Classic usar a época de 1904
+		std::time_t hostTime = static_cast<std::time_t>(classicTime - 2082844800ULL);
+
+		std::tm* timeInfo = std::gmtime(&hostTime);
+		if (timeInfo == nullptr) { state->r3 = 0; return; }
+
+		// Usamos a nossa área global reservada temporária para time_data (ex: scalars.TimeData) 
+		// ou alocamos um bloco persistente por thread. Para simplificar, usamos a estrutura interna:
+		void* p_virtualTM = ToPointer<void>(globals->scalars.TimeData);
+		FillVirtualTM(p_virtualTM, timeInfo);
+
+		state->r3 = globals->scalars.TimeData;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_IEResolvePath(StdCLib::Globals* globals, MachineState* state)
@@ -1952,7 +2075,20 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_localtime(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const uint32_t* p_timer = ToPointer<const uint32_t>(state->r3);
+		if (p_timer == nullptr) { state->r3 = 0; return; }
+
+		uint32_t classicTime = Common::CF::BigToHost<uint32_t>::Swap(*p_timer);
+		std::time_t hostTime = static_cast<std::time_t>(classicTime - 2082844800ULL);
+
+		std::tm* timeInfo = std::localtime(&hostTime);
+		if (timeInfo == nullptr) { state->r3 = 0; return; }
+
+		void* p_virtualTM = ToPointer<void>(globals->scalars.TimeData);
+		FillVirtualTM(p_virtualTM, timeInfo);
+
+		state->r3 = globals->scalars.TimeData;
+		globals->scalars.errno_ = 0;
 	}
 	
 	void StdCLib_longjmp(StdCLib::Globals* globals, PPCVM::MachineState* state)
@@ -2022,8 +2158,46 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_lseek(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+		int32_t offset = static_cast<int32_t>(state->r4);
+		int rawWhence = static_cast<int>(state->r5);
+
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1;
+			return;
+		}
+
+		// Tradução explícita das constantes clássicas de posicionamento para o Host
+		int nativeWhence;
+		switch (rawWhence)
+		{
+			case 0: nativeWhence = SEEK_SET; break; // Início
+			case 1: nativeWhence = SEEK_CUR; break; // Posição Atual
+			case 2: nativeWhence = SEEK_END; break; // Fim
+			default:
+				globals->scalars.errno_ = EINVAL;
+				state->r3 = -1;
+				return;
+		}
+
+		// Executa a busca real de 64-bits no Host (lseek retorna off_t)
+		off_t result = ::lseek(fd, offset, nativeWhence);
+
+		if (result == (off_t)-1)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			// Força o cast seguro do offset resultante de volta para os 32-bits da VM
+			state->r3 = static_cast<int32_t>(result);
+		}
 	}
+
 
 	void StdCLib_MakeResolvedFSSpec(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -2240,13 +2414,71 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_mktime(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		void* p_virtualTM = ToPointer<void>(state->r3);
+		if (p_virtualTM == nullptr) { state->r3 = -1; return; }
+
+		std::tm timeInfo = ParseVirtualTM(p_virtualTM);
+		std::time_t hostTime = std::mktime(&timeInfo);
+
+		if (hostTime == -1)
+		{
+			state->r3 = -1;
+			return;
+		}
+
+		// Atualiza a estrutura modificada de volta para a VM (ex: acerto de tm_wday)
+		FillVirtualTM(p_virtualTM, &timeInfo);
+
+		// Converte o resultado de volta para segundos da época clássica
+		uint32_t classicTime = static_cast<uint32_t>(hostTime + 2082844800ULL);
+		state->r3 = classicTime;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_open(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* path = ToPointer<const char>(state->r3);
+		uint32_t classicFlags = state->r4;
+		uint32_t classicMode = state->r5; // Usado se O_CREAT estiver ativo
+
+		if (path == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		// Tradução segura das flags clássicas (MSL/ToolBox) para POSIX do Host
+		int hostFlags = 0;
+		
+		// Isolar o modo de acesso básico
+		uint32_t accmode = classicFlags & 0x03; // Geralmente mapeia 0=O_RDONLY, 1=O_WRONLY, 2=O_RDWR
+		if (accmode == 0) hostFlags |= O_RDONLY;
+		else if (accmode == 1) hostFlags |= O_WRONLY;
+		else if (accmode == 2) hostFlags |= O_RDWR;
+
+		// Mapeamento de flags de controlo típicas do Mac OS Clássico
+		if (classicFlags & 0x0100) hostFlags |= O_CREAT;
+		if (classicFlags & 0x0200) hostFlags |= O_EXCL;
+		if (classicFlags & 0x0400) hostFlags |= O_TRUNC;
+		if (classicFlags & 0x0800) hostFlags |= O_APPEND;
+		if (classicFlags & 0x2000) hostFlags |= O_NONBLOCK;
+
+		// Executa a chamada de sistema real no Host
+		int fd = ::open(path, hostFlags, static_cast<mode_t>(classicMode));
+
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = static_cast<int32_t>(fd); // Retorna o descritor de 32-bits para a VM
+		}
 	}
+
 
 	void StdCLib_ParseTheLocaleString(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -2783,7 +3015,23 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strftime(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		char* dest = ToPointer<char>(p_dest);
+		uint32_t maxSize = state->r4;
+		const char* format = ToPointer<const char>(state->r5);
+		const void* p_virtualTM = ToPointer<const void>(state->gpr[6]); // r6 é o 4º argumento gpr
+
+		if (dest == nullptr || format == nullptr || p_virtualTM == nullptr || maxSize == 0)
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		std::tm timeInfo = ParseVirtualTM(p_virtualTM);
+		size_t written = std::strftime(dest, maxSize, format, &timeInfo);
+
+		state->r3 = static_cast<uint32_t>(written);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_strlen(StdCLib::Globals* globals, MachineState* state)
@@ -3046,7 +3294,26 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_time(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_timer = state->r3; // Endereço virtual na VM
+
+		// Obtém o tempo atual do host em segundos desde 1970
+		std::time_t hostTime = std::time(nullptr);
+
+		// Converte para a época do Mac OS Clássico (segundos desde 1904)
+		// Nota: Se a tua StdCLib no Classic usar a época Unix padrão, remove esta constante.
+		uint32_t classicTime = static_cast<uint32_t>(hostTime + 2082844800ULL);
+
+		if (p_timer != 0)
+		{
+			uint32_t* dest = ToPointer<uint32_t>(p_timer);
+			if (dest)
+			{
+				*dest = Common::CF::HostToBig<uint32_t>::Swap(classicTime);
+			}
+		}
+
+		state->r3 = classicTime;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_tmpfile(StdCLib::Globals* globals, MachineState* state)
