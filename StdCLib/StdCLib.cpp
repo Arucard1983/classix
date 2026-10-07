@@ -2092,7 +2092,33 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_memccpy(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		char* dest = ToPointer<char>(p_dest);
+		const char* src = ToPointer<const char>(state->r4);
+		int c = state->r5 & 0xFF;
+		uint32_t size = static_cast<uint32_t>(state->gpr[6]); // r6 é o 4º argumento na ABI
+
+		if (dest == nullptr || src == nullptr || size == 0)
+		{
+			state->r3 = 0; // Retorna NULL se nada for copiado ou se houver erro
+			return;
+		}
+
+		// Implementação manual segura para mapear os offsets da VM
+		for (uint32_t i = 0; i < size; i++)
+		{
+			dest[i] = src[i];
+			if (static_cast<unsigned char>(src[i]) == static_cast<unsigned char>(c))
+			{
+				// Retorna o ponteiro virtual para o carácter imediatamente a seguir ao 'c'
+				state->r3 = p_dest + i + 1;
+				globals->scalars.errno_ = 0;
+				return;
+			}
+		}
+
+		state->r3 = 0; // 'c' não foi encontrado nos 'size' bytes
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_memchr(StdCLib::Globals* globals, MachineState* state)
@@ -2160,12 +2186,51 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_memmove(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		void* dest = ToPointer<void>(p_dest);
+		const void* src = ToPointer<const void>(state->r4);
+		uint32_t size = static_cast<uint32_t>(state->r5);
+
+		if (size == 0)
+		{
+			state->r3 = p_dest;
+			return;
+		}
+
+		if (dest == nullptr || src == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			return;
+		}
+
+		// memmove lida em segurança com blocos de memória sobrepostos
+		std::memmove(dest, src, size);
+		state->r3 = p_dest;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_memset(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		void* dest = ToPointer<void>(p_dest);
+		int value = state->r4 & 0xFF;
+		uint32_t size = static_cast<uint32_t>(state->r5);
+
+		if (size == 0)
+		{
+			state->r3 = p_dest;
+			return;
+		}
+
+		if (dest == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			return;
+		}
+
+		std::memset(dest, value, size);
+		state->r3 = p_dest; // Retorna o endereço virtual original de destino
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_mktemp(StdCLib::Globals* globals, MachineState* state)
@@ -2605,7 +2670,20 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strcat(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		char* dest = ToPointer<char>(p_dest);
+		const char* src = ToPointer<const char>(state->r4);
+
+		if (dest == nullptr || src == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = p_dest;
+			return;
+		}
+
+		std::strcat(dest, src);
+		state->r3 = p_dest;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_strchr(StdCLib::Globals* globals, MachineState* state)
@@ -2684,7 +2762,18 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strcspn(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* s1 = ToPointer<const char>(state->r3);
+		const char* s2 = ToPointer<const char>(state->r4);
+
+		if (s1 == nullptr || s2 == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		size_t res = std::strcspn(s1, s2);
+		state->r3 = = static_cast<uint32_t>(res);
 	}
 
 	void StdCLib_strerror(StdCLib::Globals* globals, MachineState* state)
@@ -2721,22 +2810,85 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strncat(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		char* dest = ToPointer<char>(p_dest);
+		const char* src = ToPointer<const char>(state->r4);
+		uint32_t size = static_cast<uint32_t>(state->r5);
+
+		if (dest == nullptr || src == nullptr || size == 0)
+		{
+			state->r3 = p_dest;
+			return;
+		}
+
+		std::strncat(dest, src, size);
+		state->r3 = p_dest;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_strncmp(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* s1 = ToPointer<const char>(state->r3);
+		const char* s2 = ToPointer<const char>(state->r4);
+		uint32_t size = static_cast<uint32_t>(state->r5);
+
+		if (size == 0 || (s1 == nullptr && s2 == nullptr))
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		if (s1 == nullptr || s2 == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = (s1 == nullptr) ? -1 : 1;
+			return;
+		}
+
+		int result = std::strncmp(s1, s2, size);
+		state->r3 = static_cast<int32_t>(result);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_strncpy(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		char* dest = ToPointer<char>(p_dest);
+		const char* src = ToPointer<const char>(state->r4);
+		uint32_t size = static_cast<uint32_t>(state->r5);
+
+		if (size == 0)
+		{
+			state->r3 = p_dest;
+			return;
+		}
+
+		if (dest == nullptr || src == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			return;
+		}
+
+		std::strncpy(dest, src, size);
+		state->r3 = p_dest;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_strpbrk(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_s1 = state->r3;
+		const char* s1 = ToPointer<const char>(p_s1);
+		const char* s2 = ToPointer<const char>(state->r4);
+
+		if (s1 == nullptr || s2 == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		const char* res = std::strpbrk(s1, s2);
+		state->r3 = res ? (p_s1 + static_cast<uint32_t>(res - s1)) : 0;
 	}
 
 	void StdCLib_strrchr(StdCLib::Globals* globals, MachineState* state)
@@ -2772,12 +2924,35 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strspn(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* s1 = ToPointer<const char>(state->r3);
+		const char* s2 = ToPointer<const char>(state->r4);
+
+		if (s1 == nullptr || s2 == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		size_t res = std::strspn(s1, s2);
+		state->r3 = static_cast<uint32_t>(res);
 	}
 
 	void StdCLib_strstr(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_haystack = state->r3;
+		const char* haystack = ToPointer<const char>(p_haystack);
+		const char* needle = ToPointer<const char>(state->r4);
+
+		if (haystack == nullptr || needle == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		const char* res = std::strstr(haystack, needle);
+		state->r3 = res ? (p_haystack + static_cast<uint32_t>(res - haystack)) : 0;
 	}
 
 	void StdCLib_strtod(StdCLib::Globals* globals, MachineState* state)
@@ -2785,10 +2960,59 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 		throw PPCVM::NotImplementedException(__func__);
 	}
 
-	void StdCLib_strtok(StdCLib::Globals* globals, MachineState* state)
+		void StdCLib_strtok(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_str = state->r3;
+		const char* delim = ToPointer<const char>(state->r4);
+
+		if (delim == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		// Usamos uma variável estática local (ou preferencialmente mapeada no escopo do emulador se necessário)
+		static uint32_t p_lastTokenPos = 0;
+
+		uint32_t p_current = (p_str != 0) ? p_str : p_lastTokenPos;
+		char* current = ToPointer<char>(p_current);
+
+		if (current == nullptr || *current == '\0')
+		{
+			state->r3 = 0;
+			p_lastTokenPos = 0;
+			return;
+		}
+
+		// Ignorar delimitadores iniciais
+		size_t skip = std::strspn(current, delim);
+		if (current[skip] == '\0')
+		{
+			state->r3 = 0;
+			p_lastTokenPos = 0;
+			return;
+		}
+
+		uint32_t p_tokenStart = p_current + static_cast<uint32_t>(skip);
+		char* tokenStart = current + skip;
+
+		// Encontrar o fim do token atual
+		size_t tokenLen = std::strcspn(tokenStart, delim);
+		if (tokenStart[tokenLen] != '\0')
+		{
+			tokenStart[tokenLen] = '\0'; // Trunca o token na memória virtualizado da VM
+			p_lastTokenPos = p_tokenStart + static_cast<uint32_t>(tokenLen) + 1;
+		}
+		else
+		{
+			p_lastTokenPos = 0; // Chegou ao fim absoluto da string
+		}
+
+		state->r3 = p_tokenStart;
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib_strtol(StdCLib::Globals* globals, MachineState* state)
 	{
