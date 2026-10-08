@@ -1286,7 +1286,13 @@ extern "C"
 
 	void StdCLib_clearerr(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr != nullptr)
+		{
+			std::clearerr(fptr);
+		}
 	}
 
 	void StdCLib_clock(StdCLib::Globals* globals, MachineState* state)
@@ -1518,22 +1524,81 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_feof(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr == nullptr)
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		state->r3 = std::feof(fptr) ? 1 : 0;
 	}
 
 	void StdCLib_ferror(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr == nullptr)
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		state->r3 = std::ferror(fptr) ? 1 : 0;
 	}
 
 	void StdCLib_fflush(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3;
+		FILE* fptr = (p_iob == 0) ? nullptr : MakeFilePtr(globals, p_iob);
+
+		// Se p_iob for NULL (0), a norma C dita limpar todos os streams abertos
+		if (p_iob != 0 && fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = EOF;
+			return;
+		}
+
+		int result = std::fflush(fptr);
+		if (result == EOF)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = EOF;
+		}
+		else
+		{
+			state->r3 = 0;
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_fgetc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+		
+		if (fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = EOF;
+			return;
+		}
+
+		int result = std::fgetc(fptr);
+		if (result == EOF)
+		{
+			globals->scalars.errno_ = std::ferror(fptr) ? errno : 0;
+			state->r3 = EOF;
+		}
+		else
+		{
+			state->r3 = result & 0xFF; // Retorna o byte unsigned estrito
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_fgetpos(StdCLib::Globals* globals, MachineState* state)
@@ -1645,7 +1710,28 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_fputc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int character = state->r3;
+		uint32_t p_iob = state->r4;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = EOF;
+			return;
+		}
+
+		int result = std::fputc(character, fptr);
+		if (result == EOF)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = EOF;
+		}
+		else
+		{
+			state->r3 = result & 0xFF;
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_fputs(StdCLib::Globals* globals, MachineState* state)
@@ -1655,7 +1741,22 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_fread(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		void* ptr = ToPointer<void>(state->r3);
+		uint32_t size = state->r4;
+		uint32_t count = state->r5;
+		uint32_t p_iob = state->gpr[6]; // r6 é o 4º argumento na ABI
+		
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+		if (fptr == nullptr || (ptr == nullptr && size > 0 && count > 0))
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = 0;
+			return;
+		}
+
+		size_t elementsRead = std::fread(ptr, size, count, fptr);
+		state->r3 = static_cast<uint32_t>(elementsRead);
+		globals->scalars.errno_ = std::ferror(fptr) ? errno : 0;
 	}
 
 	void StdCLib_free(StdCLib::Globals* globals, MachineState* state)
@@ -1934,12 +2035,47 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_ftell(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1;
+			return;
+		}
+
+		long position = std::ftell(fptr);
+		if (position == -1L)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			state->r3 = static_cast<int32_t>(position);
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_fwrite(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const void* ptr = ToPointer<const void>(state->r3);
+		uint32_t size = state->r4;
+		uint32_t count = state->r5;
+		uint32_t p_iob = state->gpr[6];
+
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+		if (fptr == nullptr || (ptr == nullptr && size > 0 && count > 0))
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = 0;
+			return;
+		}
+
+		size_t elementsWritten = std::fwrite(ptr, size, count, fptr);
+		state->r3 = static_cast<uint32_t>(elementsWritten);
+		globals->scalars.errno_ = std::ferror(fptr) ? errno : 0;
 	}
 
 	void StdCLib_getc(StdCLib::Globals* globals, MachineState* state)
@@ -1949,10 +2085,20 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_getchar(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// getchar() lê diretamente do descritor de entrada do Host (stdin)
+		int result = std::getchar();
+		if (result == EOF)
+		{
+			globals->scalars.errno = std::ferror(stdin) ? errno : 0;
+			state->r3 = EOF;
+		}
+		else
+		{
+			state->r3 = result & 0xFF;
+			globals->scalars.errno_ = 0;
+		}
 	}
 
-	
 	void StdCLib_getenv(StdCLib::Globals* globals, MachineState* state)
 {
     const char* name = ToPointer<const char>(state->r3);
@@ -2136,7 +2282,7 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 	}
 
 
-	oid StdCLib_labs(StdCLib::Globals* globals, MachineState* state)
+	void StdCLib_labs(StdCLib::Globals* globals, MachineState* state)
 	{
 		int32_t val = static_cast<int32_t>(state->r3);
 		state->r3 = static_cast<int32_t>(std::labs(val));
@@ -2394,7 +2540,28 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_memchr(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_src = state->r3;
+		const void* src = ToPointer<const void>(p_src);
+		int c = state->r4 & 0xFF;
+		size_t n = static_cast<size_t>(state->r5);
+
+		if (src == nullptr || n == 0)
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		const void* res = std::memchr(src, c, n);
+		if (res == nullptr)
+		{
+			state->r3 = 0;
+		}
+		else
+		{
+			// Calcula o offset no host e mapeia de volta para o endereço virtual da VM
+			size_t offset = static_cast<const uint8_t*>(res) - static_cast<const uint8_t*>(src);
+			state->r3 = p_src + static_cast<uint32_t>(offset);
+		}
 	}
 	
 	void StdCLib_memcmp(StdCLib::Globals* globals, MachineState* state)
@@ -2980,7 +3147,20 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_putchar(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int character = state->r3;
+		int result = std::putchar(character);
+		std::fflush(stdout);
+
+		if (result == EOF)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = EOF;
+		}
+		else
+		{
+			state->r3 = result & 0xFF;
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_puts(StdCLib::Globals* globals, MachineState* state)
@@ -3154,7 +3334,18 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_rewind(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr != nullptr)
+		{
+			std::rewind(fptr);
+			globals->scalars.errno_ = 0;
+		}
+		else
+		{
+			globals->scalars.errno_ = EBADF;
+		}
 	}
 
 	void StdCLib_scanf(StdCLib::Globals* globals, MachineState* state)
@@ -3475,12 +3666,33 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 		}
 
 		size_t res = std::strcspn(s1, s2);
-		state->r3 = = static_cast<uint32_t>(res);
+		state->r3 = static_cast<uint32_t>(res);
 	}
 
 	void StdCLib_strerror(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int errnum = static_cast<int>(state->r3);
+		const char* errMsg = std::strerror(errnum);
+		
+		if (errMsg == nullptr)
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		// Alocamos dinamicamente no espaço da VM para que o Guest possa ler a string
+		size_t len = std::strlen(errMsg) + 1;
+		void* vmBuf = globals->allocator.Allocate(len, 1);
+		if (vmBuf == nullptr)
+		{
+			globals->scalars.errno_ = ENOMEM;
+			state->r3 = 0;
+			return;
+		}
+
+		std::memcpy(vmBuf, errMsg, len);
+		state->r3 = globals->allocator.ToIntPtr(vmBuf);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_strftime(StdCLib::Globals* globals, MachineState* state)
@@ -3997,7 +4209,27 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_ungetc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int character = state->r3;
+		uint32_t p_iob = state->r4;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = EOF;
+			return;
+		}
+
+		int result = std::ungetc(character, fptr);
+		if (result == EOF)
+		{
+			state->r3 = EOF;
+		}
+		else
+		{
+			state->r3 = result & 0xFF;
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_unlink(StdCLib::Globals* globals, MachineState* state)
@@ -4025,7 +4257,8 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 		uint32_t size = state->r3;
 		if (size == 0) { state->r3 = 0; return; }
 		void* ptr = globals->allocator.Allocate(size, 16); // Força alinhamento estrito AltiVec (16-byte)
-		state->r3 = ptr ? globals->allocator.ToIntPtr(ptr) : 
+		state->r3 = ptr ? globals->allocator.ToIntPtr(ptr) : 0;
+	}
 
 	void StdCLib_vec_realloc(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -4063,15 +4296,58 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 	}
 
 
-	void StdCLib_vprintf(StdCLib::Globals* globals, MachineState* state)
+		void StdCLib_vprintf(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* format = ToPointer<const char>(state->r3);
+		uint32_t p_vaList = state->r4; // Ponteiro virtual para va_list na stack da VM
+
+		if (format == nullptr) 
+		{ 
+			globals->scalars.errno_ = EINVAL; 
+			state->r3 = -1; 
+			return; 
+		}
+
+		// Constrói a string interpretando os argumentos virtuais
+		std::string output = StringPrintFFromPointer(format, *globals, p_vaList);
+
+		int result = std::printf("%s", output.c_str());
+		std::fflush(stdout);
+		
+		if (result >= 0) 
+		{ 
+			state->r3 = static_cast<int32_t>(output.size()); 
+			globals->scalars.errno_ = 0; 
+		}
+		else 
+		{
+			state->r3 = -1;
+			globals->scalars.errno_ = errno;
+		}
 	}
 
 	void StdCLib_vsprintf(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		char* destBuffer = ToPointer<char>(state->r3);
+		const char* format = ToPointer<const char>(state->r4);
+		uint32_t p_vaList = state->r5;
+
+		if (destBuffer == nullptr || format == nullptr) 
+		{ 
+			globals->scalars.errno_ = EINVAL; 
+			state->r3 = -1; 
+			return; 
+		}
+
+		std::string output = StringPrintFFromPointer(format, *globals, p_vaList);
+
+		// Copia os dados para o buffer da VM incluindo o terminador nulo '\0'
+		std::memcpy(destBuffer, output.c_str(), output.size() + 1);
+		
+		state->r3 = static_cast<int32_t>(output.size());
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib_wcstombs(StdCLib::Globals* globals, MachineState* state)
 	{
