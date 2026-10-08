@@ -132,6 +132,7 @@ const char* LibraryCodeSymbolNames[] = {
 	"FSp_fopen",
 	"FSp_freopen",
 	"FSp_fsetfileinfo",
+    "FSp_fsetpos",
 	"FSp_open",
 	"FSp_remove",
 	"FSp_rename",
