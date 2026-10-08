@@ -352,6 +352,7 @@ namespace StdCLib
 		virtual ~GlobalsDetails() override
 		{}
 	};
+
  std::string StringPrintF(const char* format, Globals& globals, MachineState* state, int startingGPR)
 {
     if (format == nullptr) return "";
@@ -359,14 +360,34 @@ namespace StdCLib
     int nextGPR = startingGPR; 
     int nextFPR = 1; 
     uint32_t stackPtr = state->r1;
-    int stackOffset = 24; 
+    int stackOffset = 24; // Deslocamento padrão de linkage na stack da ABI PowerPC 32-bit
 
-    // Lambdas auxiliares para extração segura de tipos da ABI da VM
+    // Lambdas auxiliares para extração de tipos respeitando Big-Endian
     auto getNextArg32 = [&]() -> uint32_t {
         if (nextGPR <= 10) return state->gpr[nextGPR++];
         uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
         stackOffset += 4;
         return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+    };
+
+    auto getNextArg64 = [&]() -> uint64_t {
+        uint32_t low = 0, high = 0;
+        if (nextGPR <= 9) {
+            low = state->gpr[nextGPR++];
+            high = state->gpr[nextGPR++];
+        } else if (nextGPR == 10) {
+            low = state->gpr[nextGPR++];
+            uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
+            high = ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+            stackOffset += 4;
+        } else {
+            uint32_t* ptrLow = ToPointer<uint32_t>(stackPtr + stackOffset);
+            uint32_t* ptrHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
+            low = ptrLow ? Common::CF::BigToHost<uint32_t>::Swap(*ptrLow) : 0;
+            high = ptrHigh ? Common::CF::BigToHost<uint32_t>::Swap(*ptrHigh) : 0;
+            stackOffset += 8;
+        }
+        return (static_cast<uint64_t>(low) << 32) | high;
     };
 
     auto advanceGPRSpace = [&](int words) {
@@ -382,153 +403,88 @@ namespace StdCLib
 
     while (i < len)
     {
-        if (format[i] == '%' && i + 1 < len)
+        if (format[i] == '%')
         {
-            i++; 
-            if (format[i] == '%') { output += '%'; i++; continue; }
+            size_t startToken = i;
+            i++; // salta o '%'
+            if (i < len && format[i] == '%') { output += '%'; i++; continue; }
 
-            // Ignorar flags de largura/precisão básicas para o parser simples
-            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-')) i++;
+            // 1. Fazer o parsing de flags, largura e precisão
+            while (i < len && (format[i] == '-' || format[i] == '+' || format[i] == ' ' || format[i] == '0' || format[i] == '#')) i++;
+            while (i < len && (format[i] >= '0' && format[i] <= '9')) i++;
+            if (i < len && format[i] == '.') {
+                i++;
+                while (i < len && (format[i] >= '0' && format[i] <= '9')) i++;
+            }
+
+            // 2. Detetar modificadores de tamanho (l, ll, h, z, etc.)
+            std::string lengthMod = "";
+            if (i < len && (format[i] == 'l' || format[i] == 'h' || format[i] == 'z' || format[i] == 'j' || format[i] == 't')) {
+                lengthMod += format[i];
+                i++;
+                if (i < len && format[i - 1] == 'l' && format[i] == 'l') {
+                    lengthMod += format[i];
+                    i++;
+                }
+            }
+
             if (i >= len) break;
-
             char specifier = format[i];
-            char buffer[256];
+            i++; // Consome o especificador
+
+            // Reconstrói a string de formato parcial (ex: "%02x", "%.2f")
+            std::string tokenFormat = fullPath(format + startToken).substr(0, i - startToken);
+
+            char buffer[512];
 
             switch (specifier)
             {
-                case 'd': case 'i':
-                    std::snprintf(buffer, sizeof(buffer), "%d", static_cast<int32_t>(getNextArg32()));
+                case 'd': case 'i': case 'o': case 'u': case 'x': case 'X':
+                    if (lengthMod == "ll" || lengthMod == "j") {
+                        std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), getNextArg64());
+                    } else {
+                        // l ou padrão consomem 32-bits na ABI clássica do PowerPC de 32-bit
+                        std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), getNextArg32());
+                    }
                     output += buffer;
                     break;
-                case 'u':
-                    std::snprintf(buffer, sizeof(buffer), "%u", getNextArg32());
-                    output += buffer;
-                    break;
-                case 'x': case 'X':
-                    std::snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", getNextArg32());
-                    output += buffer;
-                    break;
+
                 case 'c':
-                    output += static_cast<char>(getNextArg32() & 0xFF);
+                    std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), static_cast<char>(getNextArg32() & 0xFF));
+                    output += buffer;
                     break;
+
                 case 's': {
                     const char* str = ToPointer<const char>(getNextArg32());
-                    output += str ? str : "(null)";
-                    break;
-                }
-                case 'p':
-                    std::snprintf(buffer, sizeof(buffer), "0x%08x", getNextArg32());
+                    std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), str ? str : "(null)");
                     output += buffer;
                     break;
-                case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': {
+                }
+
+                case 'p':
+                    std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), reinterpret_cast<void*>(getNextArg32()));
+                    output += buffer;
+                    break;
+
+                case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': case 'a': case 'A': {
                     double val = 0.0;
                     if (nextFPR <= 13) {
                         val = state->fpr[nextFPR++];
-                        advanceGPRSpace(2);
+                        advanceGPRSpace(2); // Doubles consomem espaço equivalente a 2 GPRs na stack flutuante
                     } else {
-                        uint32_t* slotLow = ToPointer<uint32_t>(stackPtr + stackOffset);
-                        uint32_t* slotHigh = ToPointer<uint32_t>(stackPtr + stackOffset + 4);
-                        if (slotLow && slotHigh) {
-                            uint64_t rawDouble = (static_cast<uint64_t>(Common::CF::BigToHost<uint32_t>::Swap(*slotLow)) << 32) | 
-                                                 Common::CF::BigToHost<uint32_t>::Swap(*slotHigh);
-                            std::memcpy(&val, &rawDouble, sizeof(double));
-                        }
-                        stackOffset += 8;
-                        advanceGPRSpace(2);
+                        uint64_t rawDouble = getNextArg64();
+                        std::memcpy(&val, &rawDouble, sizeof(double));
                     }
-                    std::snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
+                    std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), val);
                     output += buffer;
                     break;
                 }
+
                 default:
-                    output += '%';
-                    output += specifier;
+                    // Se o token for desconhecido, copia em bruto para evitar perdas
+                    output += tokenFormat;
                     break;
             }
-            i++;
-        }
-        else
-        {
-            output += format[i];
-            i++;
-        }
-    }
-    return output;
- }
-
- std::string StringPrintFFromPointer(const char* format, Globals& globals, uint32_t argPtr)
-{
-    if (format == nullptr || argPtr == 0) return "";
-
-    uint32_t currentArgPtr = argPtr;
-
-    auto getNextArg32 = [&]() -> uint32_t {
-        uint32_t* ptr = ToPointer<uint32_t>(currentArgPtr);
-        currentArgPtr += 4; // Avança 4 bytes na stack da VM
-        return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
-    };
-
-    std::string output;
-    size_t i = 0;
-    size_t len = std::strlen(format);
-
-    while (i < len)
-    {
-        if (format[i] == '%' && i + 1 < len)
-        {
-            i++; 
-            if (format[i] == '%') { output += '%'; i++; continue; }
-
-            while (i < len && (format[i] == '.' || (format[i] >= '0' && format[i] <= '9') || format[i] == '-')) i++;
-            if (i >= len) break;
-
-            char specifier = format[i];
-            char buffer[256];
-
-            switch (specifier)
-            {
-                case 'd': case 'i':
-                    std::snprintf(buffer, sizeof(buffer), "%d", static_cast<int32_t>(getNextArg32()));
-                    output += buffer;
-                    break;
-                case 'u':
-                    std::snprintf(buffer, sizeof(buffer), "%u", getNextArg32());
-                    output += buffer;
-                    break;
-                case 'x': case 'X':
-                    std::snprintf(buffer, sizeof(buffer), specifier == 'x' ? "%x" : "%X", getNextArg32());
-                    output += buffer;
-                    break;
-                case 'c':
-                    output += static_cast<char>(getNextArg32() & 0xFF);
-                    break;
-                case 's': {
-                    const char* str = ToPointer<const char>(getNextArg32());
-                    output += str ? str : "(null)";
-                    break;
-                }
-                case 'p':
-                    std::snprintf(buffer, sizeof(buffer), "0x%08x", getNextArg32());
-                    output += buffer;
-                    break;
-                case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': {
-                    // Na stack de varargs crua de 32-bit do PowerPC, os doubles ocupam 8 bytes alinhados
-                    double val = 0.0;
-                    uint32_t low = getNextArg32();
-                    uint32_t high = getNextArg32();
-                    uint64_t rawDouble = (static_cast<uint64_t>(low) << 32) | high;
-                    std::memcpy(&val, &rawDouble, sizeof(double));
-                    
-                    std::snprintf(buffer, sizeof(buffer), specifier == 'f' ? "%f" : "%g", val);
-                    output += buffer;
-                    break;
-                }
-                default:
-                    output += '%';
-                    output += specifier;
-                    break;
-            }
-            i++;
         }
         else
         {
@@ -538,6 +494,116 @@ namespace StdCLib
     }
     return output;
 }
+
+std::string StringPrintFFromPointer(const char* format, Globals& globals, uint32_t argPtr)
+{
+    if (format == nullptr || argPtr == 0) return "";
+
+    uint32_t currentArgPtr = argPtr;
+
+    auto getNextArg32 = [&]() -> uint32_t {
+        uint32_t* ptr = ToPointer<uint32_t>(currentArgPtr);
+        currentArgPtr += 4;
+        return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+    };
+
+    auto getNextArg64 = [&]() -> uint64_t {
+        uint32_t* ptrLow = ToPointer<uint32_t>(currentArgPtr);
+        uint32_t* ptrHigh = ToPointer<uint32_t>(currentArgPtr + 4);
+        currentArgPtr += 8;
+        uint32_t low = ptrLow ? Common::CF::BigToHost<uint32_t>::Swap(*ptrLow) : 0;
+        uint32_t high = ptrHigh ? Common::CF::BigToHost<uint32_t>::Swap(*ptrHigh) : 0;
+        return (static_cast<uint64_t>(low) << 32) | high;
+    };
+
+    std::string output;
+    size_t i = 0;
+    size_t len = std::strlen(format);
+
+    while (i < len)
+    {
+        if (format[i] == '%')
+        {
+            size_t startToken = i;
+            i++;
+            if (i < len && format[i] == '%') { output += '%'; i++; continue; }
+
+            while (i < len && (format[i] == '-' || format[i] == '+' || format[i] == ' ' || format[i] == '0' || format[i] == '#')) i++;
+            while (i < len && (format[i] >= '0' && format[i] <= '9')) i++;
+            if (i < len && format[i] == '.') {
+                i++;
+                while (i < len && (format[i] >= '0' && format[i] <= '9')) i++;
+            }
+
+            std::string lengthMod = "";
+            if (i < len && (format[i] == 'l' || format[i] == 'h' || format[i] == 'z' || format[i] == 'j' || format[i] == 't')) {
+                lengthMod += format[i];
+                i++;
+                if (i < len && format[i - 1] == 'l' && format[i] == 'l') {
+                    lengthMod += format[i];
+                    i++;
+                }
+            }
+
+            if (i >= len) break;
+            char specifier = format[i];
+            i++;
+
+            std::string tokenFormat = std::string(format + startToken).substr(0, i - startToken);
+            char buffer[512];
+
+            switch (specifier)
+            {
+                case 'd': case 'i': case 'o': case 'u': case 'x': case 'X':
+                    if (lengthMod == "ll" || lengthMod == "j") {
+                        std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), getNextArg64());
+                    } else {
+                        std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), getNextArg32());
+                    }
+                    output += buffer;
+                    break;
+
+                case 'c':
+                    std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), static_cast<char>(getNextArg32() & 0xFF));
+                    output += buffer;
+                    break;
+
+                case 's': {
+                    const char* str = ToPointer<const char>(getNextArg32());
+                    std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), str ? str : "(null)");
+                    output += buffer;
+                    break;
+                }
+
+                case 'p':
+                    std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), reinterpret_cast<void*>(getNextArg32()));
+                    output += buffer;
+                    break;
+
+                case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': case 'a': case 'A': {
+                    // Na stack de varargs crua de 32-bit do PowerPC, os doubles ocupam sempre 8 bytes alinhados
+                    double val = 0.0;
+                    uint64_t rawDouble = getNextArg64();
+                    std::memcpy(&val, &rawDouble, sizeof(double));
+                    std::snprintf(buffer, sizeof(buffer), tokenFormat.c_str(), val);
+                    output += buffer;
+                    break;
+                }
+
+                default:
+                    output += tokenFormat;
+                    break;
+            }
+        }
+        else
+        {
+            output += format[i];
+            i++;
+        }
+    }
+    return output;
+}
+
 
   void FillVirtualTM(void* destPtr, const std::tm* t)
 	{
@@ -727,6 +793,7 @@ extern "C"
 	{
 		// Retorna o número padrão de traps da Toolbox suportados pela arquitetura clássica (tipicamente 0x400)
 		state->r3 = 0x0400;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib___RestoreInitialCFragWorld(StdCLib::Globals* globals, MachineState* state)
@@ -2326,7 +2393,12 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_getpid(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Obtém o ID do processo real do Host através da chamada POSIX padrão
+		pid_t pid = ::getpid();
+
+		// Garante o cast seguro e limpo para o registador r3 de 32-bits do PowerPC
+		state->r3 = static_cast<int32_t>(pid);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_gets(StdCLib::Globals* globals, MachineState* state)
@@ -3427,7 +3499,21 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_raise(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int sig = static_cast<int>(state->r3);
+
+		// Dispara o sinal diretamente no ecossistema do Host para o processo atual
+		int result = ::raise(sig);
+
+		if (result != 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1; // Falha ao lançar o sinal
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = 0;  // Sucesso
+		}
 	}
 
 	void StdCLib_rand(StdCLib::Globals* globals, MachineState* state)
@@ -3624,8 +3710,45 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_signal(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int sig = static_cast<int>(state->r3);
+		uint32_t p_handlerVector = state->r4; // Ponteiro virtual para o Vector/Função na VM
+
+		// Constantes padrão da norma C para comportamentos especiais
+		// SIG_DFL = 0, SIG_IGN = 1, SIG_ERR = -1
+		if (p_handlerVector == 0 || p_handlerVector == 1)
+		{
+			// Se for comportamento padrão ou ignorar, podemos delegar diretamente no Host
+			void (*hostHandler)(int) = (p_handlerVector == 0) ? SIG_DFL : SIG_IGN;
+			void (*prevHandler)(int) = ::signal(sig, hostHandler);
+
+			if (prevHandler == SIG_ERR)
+			{
+				globals->scalars.errno_ = errno;
+				state->r3 = 0xFFFFFFFF; // SIG_ERR
+			}
+			else if (prevHandler == SIG_IGN)
+			{
+				state->r3 = 1;
+			}
+			else
+			{
+				state->r3 = 0;
+			}
+			return;
+		}
+
+		// Armadilha de Compatibilidade: Se a aplicação tentar registar uma função PowerPC real,
+		// o emulador interseta o pedido. Em implementações futuras avançadas, isto dispararia
+		// um callback assíncrono no interpretador. Por agora, aceitamos e simulamos sucesso
+		// para permitir que o fluxo da aplicação Guest prossiga sem crashing.
+		std::fprintf(stderr, "[ClassiC] signal: Aplicacao registou manipulador virtual para o sinal %d (PC: 0x%08x).\n", 
+			sig, p_handlerVector);
+
+		// Retorna um sucesso simulado (assumindo que o anterior era o default)
+		state->r3 = 0; 
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib_sprintf(StdCLib::Globals* globals, PPCVM::MachineState* state)
 	{
@@ -4507,7 +4630,17 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_TrapAvailable(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Esta rotina da MSL verifica se uma trap específica (em r3) está implementada no ambiente.
+		// Como o teu fork do ClassiC está a reconstruir a API progressivamente, a abordagem mais robusta
+		// para o runtime não abortar é responder que a trap está disponível (retorna 1).
+		// Caso isoles uma trap que cause falhas por não estar emulada, podes adicionar uma exceção aqui.
+		uint32_t trapNum = state->r3;
+		
+		// Descomentar para depuração se precisares de mapear o que a aplicação Guest anda a procurar:
+		// std::fprintf(stderr, "[ClassiX] TrapAvailable: Program was tested the avaliability of trap 0x%04X\n", trapNum);
+		
+		state->r3 = 1; // 1 = Disponível/Suportada, 0 = Não implementada
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_ungetc(StdCLib::Globals* globals, MachineState* state)
