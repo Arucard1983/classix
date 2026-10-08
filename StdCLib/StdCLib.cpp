@@ -1478,19 +1478,24 @@ extern "C"
               state->r3 = result & 0xff;
 	}
 
-	void StdCLib__fsClose(StdCLib::Globals* globals, MachineState* state)
+		void StdCLib__fsClose(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Atua como um clone direto do fecho padrão de ficheiros (fclose)
+		StdCLib_fclose(globals, state);
 	}
 
 	void StdCLib__fsFAccess(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Redireciona para o validador de acesso POSIX genérico que já blindámos
+		StdCLib_faccess(globals, state);
 	}
 
 	void StdCLib__fsIoctl(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Segue a mesma blindagem de No-Op defensivo do ioctl geral
+		// para evitar quebras de alinhamento e desalinhamentos na VM
+		state->r3 = 0; // noErr
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__fsRead(StdCLib::Globals* globals, MachineState* state)
@@ -1501,7 +1506,9 @@ extern "C"
 
 	void StdCLib__FSSpec2Path(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// É o wrapper oficial que aponta diretamente para a nossa rotina 
+		// canónica de conversão de FSSpec do Mac OS Clássico para caminhos Unix
+		StdCLib_FSSpec2Path_Long(globals, state);
 	}
 
 	void StdCLib__fsWrite(StdCLib::Globals* globals, MachineState* state)
