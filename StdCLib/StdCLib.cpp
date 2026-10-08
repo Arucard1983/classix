@@ -2652,7 +2652,59 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_localeconv(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// 1. Obter a localização regional ativa no Host nativo de 64-bits
+		struct lconv* hostLconv = std::localeconv();
+		if (hostLconv == nullptr)
+		{
+			state->r3 = 0;
+			return;
+		}
+
+		// 2. Para evitar Memory Leaks e desalinhamentos de 64-bits, usamos a área global 
+		// reservada temporária nos scalars para mapear a tabela de 32-bits visível pelo Guest.
+		// No Mac OS Clássico/MSL, o struct lconv de 32-bits é tipicamente um bloco compacto de ponteiros:
+		// [decimal_point, thousands_sep, grouping, int_curr_symbol, currency_symbol, ...]
+		
+		// Mapeamos os buffers de string do Host para endereços virtuais na VM em áreas de cortesia
+		char* vmNumericBuf = ToPointer<char>(globals->scalars.NumericData);
+		char* vmMoneyBuf = ToPointer<char>(globals->scalars.MoneyData);
+
+		if (vmNumericBuf && vmMoneyBuf)
+		{
+			// Copiamos os caracteres básicos de formatação local do Host para os buffers da VM
+			std::snprintf(vmNumericBuf, 16, "%s", hostLconv->decimal_point ? hostLconv->decimal_point : ".");
+			std::snprintf(vmNumericBuf + 4, 16, "%s", hostLconv->thousands_sep ? hostLconv->thousands_sep : "");
+			
+			std::snprintf(vmMoneyBuf, 16, "%s", hostLconv->currency_symbol ? hostLconv->currency_symbol : "");
+			std::snprintf(vmMoneyBuf + 8, 16, "%s", hostLconv->int_curr_symbol ? hostLconv->int_curr_symbol : "");
+		}
+
+		// 3. Montar a tabela de ponteiros de 32-bits Big-Endian no bloco alvo da VM.
+		// Usamos a área dedicada `_CategoryLoc` para depositar o cabeçalho do struct lconv emulado.
+		uint32_t* virtualLconvStruct = ToPointer<uint32_t>(globals->scalars._CategoryLoc);
+		
+		if (virtualLconvStruct)
+		{
+			using namespace Common::CF;
+			// Preenchemos os ponteiros virtuais convertendo para Big-Endian conforme a ABI da VM exige
+			virtualLconvStruct[0] = HostToBig<uint32_t>::Swap(globals->scalars.NumericData);     // decimal_point
+			virtualLconvStruct[1] = HostToBig<uint32_t>::Swap(globals->scalars.NumericData + 4); // thousands_sep
+			virtualLconvStruct[2] = HostToBig<uint32_t>::Swap(0);                               // grouping (vazio para simplificar)
+			virtualLconvStruct[3] = HostToBig<uint32_t>::Swap(globals->scalars.MoneyData + 8);   // int_curr_symbol
+			virtualLconvStruct[4] = HostToBig<uint32_t>::Swap(globals->scalars.MoneyData);       // currency_symbol
+			
+			// Os restantes campos numéricos (frac_digits, p_cs_precedes, etc.) podem ser emulados 
+			// preenchendo os bytes subsequentes com os valores canónicos (geralmente CHAR_MAX ou valores nativos).
+			uint8_t* byteFields = reinterpret_cast<uint8_t*>(&virtualLconvStruct[5]);
+			byteFields[0] = hostLconv->frac_digits;
+			byteFields[1] = hostLconv->p_cs_precedes;
+			byteFields[2] = hostLconv->p_sep_by_space;
+			byteFields[3] = hostLconv->n_cs_precedes;
+		}
+
+		// Devolvemos com total segurança o endereço virtual de 32-bits da estrutura emulada
+		state->r3 = globals->scalars._CategoryLoc;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_localtime(StdCLib::Globals* globals, MachineState* state)
@@ -4518,7 +4570,34 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strxfrm(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_dest = state->r3;
+		char* dest = ToPointer<char>(p_dest);
+		const char* src = ToPointer<const char>(state->r4);
+		size_t n = static_cast<size_t>(state->r5);
+
+		if (src == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+
+		// Se a aplicação passar um buffer de destino válido e tamanho, transforma a string
+		// de acordo com as regras de ordenação lexicográfica regional ativas no Host.
+		size_t result = 0;
+		if (dest != nullptr && n > 0)
+		{
+			result = std::strxfrm(dest, src, n);
+		}
+		else
+		{
+			// Se dest for NULL ou n for 0, strxfrm apenas calcula o tamanho necessário
+			result = std::strxfrm(nullptr, src, 0);
+		}
+
+		// Devolve o tamanho real da string transformada para o registador de 32-bits da VM
+		state->r3 = static_cast<uint32_t>(result);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_system(StdCLib::Globals* globals, MachineState* state)
