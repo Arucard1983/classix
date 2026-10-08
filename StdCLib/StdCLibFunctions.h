@@ -148,6 +148,7 @@ extern "C"
 	void StdCLib_FSp_fopen(StdCLib::Globals* globals, PPCVM::MachineState* state);
 	void StdCLib_FSp_freopen(StdCLib::Globals* globals, PPCVM::MachineState* state);
 	void StdCLib_FSp_fsetfileinfo(StdCLib::Globals* globals, PPCVM::MachineState* state);
+    void StdCLib_FSp_fsetpos(StdCLib::Globals* globals, PPCVM::MachineState* state);
 	void StdCLib_FSp_open(StdCLib::Globals* globals, PPCVM::MachineState* state);
 	void StdCLib_FSp_remove(StdCLib::Globals* globals, PPCVM::MachineState* state);
 	void StdCLib_FSp_rename(StdCLib::Globals* globals, PPCVM::MachineState* state);
