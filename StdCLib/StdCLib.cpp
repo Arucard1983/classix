@@ -1387,7 +1387,28 @@ extern "C"
 
 	void StdCLib_dup(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int oldfd = static_cast<int>(state->r3);
+		
+		if (oldfd < 0)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1;
+			return;
+		}
+
+		// Chamada direta ao sistema nativo
+		int newfd = ::dup(oldfd);
+
+		if (newfd < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = static_cast<int32_t>(newfd); // Retorna o novo descritor de 32-bits
+		}
 	}
 
 	void StdCLib_ecvt(StdCLib::Globals* globals, MachineState* state)
@@ -1509,8 +1530,51 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_fcntl(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+		int cmd = static_cast<int>(state->r4);
+		uint32_t arg = state->r5; // Pode ser um inteiro ou um ponteiro virtual para a VM
+
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1;
+			return;
+		}
+
+		// Blindagem contra comandos complexos que usem structs (ex: struct flock de 32-bits)
+		if (cmd == F_GETLK || cmd == F_SETLK || cmd == F_SETLKW)
+		{
+			// Se o teu emulador não mapeia o struct flock de 32 para 64 bits, 
+			// o mais seguro é falhar controladamente em vez de corromper o host.
+			std::fprintf(stderr, "[ClassiX] fcntl: Unsupported locking (%d) command (Incompatible 32-bit Lockup).\n", cmd);
+			globals->scalars.errno_ = ENOTSUP;
+			state->r3 = -1;
+			return;
+		}
+
+		// Tratamento de comandos de flags numéricos comuns (seguros e diretos)
+		long result = 0;
+		if (cmd == F_DUPFD || cmd == F_SETFD || cmd == F_SETFL)
+		{
+			result = ::fcntl(fd, cmd, static_cast<int>(arg));
+		}
+		else // Comandos que não recebem terceiro argumento (ex: F_GETFD, F_GETFL)
+		{
+			result = ::fcntl(fd, cmd);
+		}
+
+		if (result < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = static_cast<int32_t>(result);
+		}
 	}
+
 
 	void StdCLib_fcvt(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -2192,10 +2256,24 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_ioctl(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+		uint32_t request = state->r4;
+		uint32_t p_vmArg = state->r5; // Quase sempre um ponteiro virtual para dados da VM
+
+		// Alerta de Segurança Crítico:
+		// Não podemos fazer "::ioctl(fd, request, ToPointer(p_vmArg))" cegamente.
+		// Se o ioctl nativo do host esperar ler/escrever 8 bytes (64-bit) e a VM só 
+		// alocou 4 bytes (32-bit), o host vai rebentar a sandbox e causar um SegFault.
+		
+		std::fprintf(stderr, "[ClassiX] ioctl: Ignored request 0x%08x on fd %d to avoid memory corruption.\n", request, fd);
+		
+		// Como o ioctl varia de OS para OS, definir um No-Op seguro ou ENOTTY (Inappropriate ioctl for device)
+		// é a abordagem padrão em emulação até isolares que pedidos específicos a tua app Guest exige.
+		globals->scalars.errno_ = ENOTTY; 
+		state->r3 = -1;
 	}
 
-    	void StdCLib_isalnum(StdCLib::Globals* globals, MachineState* state)
+    void StdCLib_isalnum(StdCLib::Globals* globals, MachineState* state)
 	{
 		int ch = static_cast<int>(state->r3 & 0xFF);
 		uint8_t flags = globals->scalars.cType[ch];
@@ -2673,7 +2751,35 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_mktemp(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_template = state->r3; // Endereço virtual da string com o padrão (ex: "/tmp/fileXXXXXX")
+		char* templateStr = ToPointer<char>(p_template);
+		
+		if (templateStr == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+		
+		// O mktemp clássico/POSIX modifica o template diretamente na memória.
+		// Como templateStr aponta para a memória perfeitamente mapeada da VM, podemos
+		// invocar com segurança a função de sistema do host que lida com o padrão.
+		// Nota: mktemp() nativo está obsoleto em POSIX moderno (preferindo-se mkstemp), 
+		// mas para simular o comportamento exato sem abrir o ficheiro, preservamos o comportamento.
+		char* result = ::mktemp(templateStr);
+		
+		if (result == nullptr || (std::strlen(templateStr) > 0 && templateStr[0] == '\0'))
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = 0; // Falha catastrófica ao mutar o padrão
+		}
+		else
+		{
+			// Sucesso: os bytes na memória virtual foram modificados pelo host.
+			// Devolvemos o endereço virtual original de 32-bits (r3) para manter a ABI estável.
+			globals->scalars.errno_ = 0;
+			state->r3 = p_template;
+		}
 	}
 
 	void StdCLib_mktime(StdCLib::Globals* globals, MachineState* state)
@@ -4153,13 +4259,99 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_tmpfile(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// 1. Procurar por um descritor de ficheiro vago na tabela virtual _iob
+		for (int i = 0; i < StdCLib::NFILE; i++)
+		{
+			auto& ioBuffer = globals->scalars._iob[i];
+			uint32_t p_iobAddress = ToIntPtr(&ioBuffer);
+			
+			// Se o endereço virtual do slot iob não está no mapa, o slot está livre
+			if (globals->nativeFileMap.find(p_iobAddress) == globals->nativeFileMap.end())
+			{
+				// Cria o ficheiro temporário físico seguro no Host (abre-se em "wb+")
+				FILE* hostFile = std::tmpfile();
+				if (hostFile == nullptr)
+				{
+					globals->scalars.errno_ = errno;
+					state->r3 = 0; // Retorna NULL em caso de falha física no Host
+					return;
+				}
+				
+				// Inicializa os metadados clássicos esperados pela VM do PowerPC
+				ioBuffer._file = i;
+				ioBuffer._flag = 0x01; // Flag MSL padrão para ficheiro aberto
+				ioBuffer._cnt  = 0;
+				ioBuffer._ptr  = 0;
+				ioBuffer._base = 0;
+				ioBuffer._end  = 0;
+				ioBuffer._size = 0;
+				
+				// Associa e protege o par no mapa seguro de 64-bits
+				globals->nativeFileMap[p_iobAddress] = hostFile;
+				
+				// Devolve com sucesso o endereço virtual de 32-bits para a VM
+				globals->scalars.errno_ = 0;
+				state->r3 = p_iobAddress;
+				return;
+			}
+		}
+		
+		// Se a tabela interna NFILE (40) esgotou
+		globals->scalars.errno_ = EMFILE;
+		state->r3 = 0;
 	}
 
 	void StdCLib_tmpnam(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_destBuffer = state->r3; // Endereço virtual enviado pela VM (pode ser NULL/0)
+		
+		// Geramos o nome temporário usando a rotina nativa segura do Host
+		char hostPathBuffer[L_tmpnam];
+		char* result = std::tmpnam(hostPathBuffer);
+		
+		if (result == nullptr)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = 0;
+			return;
+		}
+		
+		size_t len = std::strlen(hostPathBuffer) + 1;
+		
+		if (p_destBuffer == 0)
+		{
+			// De acordo com a norma C, se for passado NULL, a função deve retornar 
+			// um ponteiro para um buffer estático interno gerido pela biblioteca.
+			// Usamos uma área global temporária segura dentro da estrutura de scalars.
+			void* p_virtualStatic = ToPointer<void>(globals->scalars._lastbuf);
+			if (p_virtualStatic == nullptr)
+			{
+				globals->scalars.errno_ = ENOMEM;
+				state->r3 = 0;
+				return;
+			}
+			
+			std::memcpy(p_virtualStatic, hostPathBuffer, len);
+			state->r3 = globals->scalars._lastbuf; // Devolve o endereço da área estática virtual
+		}
+		else
+		{
+			// Se o utilizador forneceu um buffer na VM, validamos e copiamos diretamente para lá
+			char* dest = ToPointer<char>(p_destBuffer);
+			if (dest == nullptr)
+			{
+				globals->scalars.errno_ = EFAULT;
+				state->r3 = 0;
+				return;
+			}
+			
+			std::memcpy(dest, hostPathBuffer, len);
+			state->r3 = p_destBuffer; // Devolve o endereço virtual original recebido
+		}
+		
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib_toascii(StdCLib::Globals* globals, MachineState* state)
 	{
