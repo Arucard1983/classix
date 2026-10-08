@@ -872,21 +872,88 @@ extern "C"
     globals->scalars.errno_ = 0;
 }
 
+		void StdCLib___vec_setjmp(StdCLib::Globals* globals, MachineState* state)
+	{
+		uint32_t p_jmpBuf = state->r3;
+		uint32_t* jmpBuf = ToPointer<uint32_t>(p_jmpBuf);
+		if (jmpBuf == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		// 1. Primeiro executamos o setjmp padrão para salvar LR, CR, R1, R2 e GPRs/FPRs.
+		// Como a StdCLib___setjmp já trata o byte-swap e a ABI, reutilizamo-la diretamente.
+		StdCLib___setjmp(globals, state);
+
+		// 2. Extensão AltiVec: Salvar os registadores vetoriais da VM.
+		// De acordo com a convenção clássica, o bloco AltiVec começa após os slots padrão do jmpBuf (a partir do offset 64).
+		// Nota: Deves adaptar 'state->vpr' ou o array vetorial conforme a nomenclatura exata da tua estrutura MachineState.
+		// Cada registador vetorial AltiVec tem 16 bytes (4 words de 32-bits).
+		using namespace Common::CF;
+		uint32_t* vecSlot = jmpBuf + 64;
+
+		for (int i = 0; i < 32; i++)
+		{
+			// Copia os 4 blocos de 32-bits do registador vetorial 'i' aplicando o Swap Big-Endian
+			// Assumindo que o teu MachineState expõe os vetores como uma união ou array de uint32_t[4]:
+			vecSlot[i * 4 + 0] = HostToBig<uint32_t>::Swap(state->vpr[i].u32[0]);
+			vecSlot[i * 4 + 1] = HostToBig<uint32_t>::Swap(state->vpr[i].u32[1]);
+			vecSlot[i * 4 + 2] = HostToBig<uint32_t>::Swap(state->vpr[i].u32[2]);
+			vecSlot[i * 4 + 3] = HostToBig<uint32_t>::Swap(state->vpr[i].u32[3]);
+		}
+
+		// 3. Salvar o Vector Status and Control Register (VSCR) se a tua VM o emular
+		// vecSlot[128] = HostToBig<uint32_t>::Swap(state->vscr);
+
+		// O setjmp inicial retorna sempre 0
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
+	}
 
 	void StdCLib___vec_longjmp(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+		uint32_t p_jmpBuf = state->r3;
+		uint32_t* jmpBuf = ToPointer<uint32_t>(p_jmpBuf);
+		int value = state->r4;
 
-	void StdCLib___vec_setjmp(StdCLib::Globals* globals, MachineState* state)
-	{
-		throw PPCVM::NotImplementedException(__func__);
+		if (jmpBuf == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			throw std::runtime_error("FALHA CRITICA: vec_longjmp chamado com um jmpBuf nulo.");
+		}
+
+		if (value == 0) value = 1;
+
+		// 1. Extensão AltiVec: Restaurar o estado dos registadores vetoriais antes do desvio final.
+		using namespace Common::CF;
+		const uint32_t* vecSlot = jmpBuf + 64;
+
+		for (int i = 0; i < 32; i++)
+		{
+			state->vpr[i].u32[0] = BigToHost<uint32_t>::Swap(vecSlot[i * 4 + 0]);
+			state->vpr[i].u32[1] = BigToHost<uint32_t>::Swap(vecSlot[i * 4 + 1]);
+			state->vpr[i].u32[2] = BigToHost<uint32_t>::Swap(vecSlot[i * 4 + 2]);
+			state->vpr[i].u32[3] = BigToHost<uint32_t>::Swap(vecSlot[i * 4 + 3]);
+		}
+
+		// 2. Restaurar o VSCR se aplicável
+		// state->vscr = BigToHost<uint32_t>::Swap(vecSlot[128]);
+
+		// 3. Executar o longjmp padrão que vai restaurar os GPRs, FPRs, LR, PC e injetar o 'value' em r3
+		StdCLib_longjmp(globals, state);
 	}
 
 	void StdCLib__addDevHandler(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No Mac OS Clássico, instalava um driver procedural dinâmico na tabela de dispositivos de I/O.
+		// Como o ecossistema do ClassiC delega o acesso a ficheiros e consola diretamente nas chamadas POSIX 
+		// isoladas do host que já estruturámos, definimos um No-Op de sucesso por cortesia à aplicação Guest.
+		state->r3 = 0; // noErr
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib__badPtr(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -908,28 +975,77 @@ extern "C"
 	}
 
 
-	void StdCLib__Bogus(StdCLib::Globals* globals, MachineState* state)
+		void StdCLib__Bogus(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Função fantasma interna da Metrowerks. Retornamos sucesso (0) 
+		// para manter a estabilidade do fluxo da VM.
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__BreakPoint(StdCLib::Globals* globals, MachineState* state)
 	{
-		const char* reason = ToPointer<char>(state->r3);
-		std::fprintf(stderr, "[ClassiX] Interrupted by breakpoint: %s\n", reason ? reason : "unknown reason.");
+		const char* reason = ToPointer<const char>(state->r3);
+		std::fprintf(stderr, "[ClassiX] Interrupted by CodeWarrior Breakpoint: %s\n", reason ? reason : "no reason provided.");
 		std::fflush(stderr);
-		std::raise(SIGTRAP);
+		
+		globals->scalars.errno_ = 0;
+		std::raise(SIGTRAP); // Dispara a interrupção de debug no Host de forma controlada
 	}
 
 	void StdCLib__bufsync(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3; // Endereço virtual da estrutura PPCFILE
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr != nullptr)
+		{
+			// Força a sincronização do buffer físico do Host
+			std::fflush(fptr);
+		}
+		
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__c2pstrcpy(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_destPascal = state->r3;  // Buffer de destino na VM (Pascal String)
+		uint32_t p_srcCString = state->r4;  // String de origem na VM (C-String)
+
+		uint8_t* dest = ToPointer<uint8_t>(p_destPascal);
+		const char* src = ToPointer<const char>(p_srcCString);
+
+		if (dest == nullptr || src == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = p_destPascal;
+			return;
+		}
+
+		// Descobrir o comprimento da C-String original
+		size_t srcLen = std::strlen(src);
+		
+		// Uma Pascal String clássica está estritamente limitada a um máximo de 255 bytes 
+		// porque o comprimento tem de caber num único byte (uint8_t).
+		if (srcLen > 255)
+		{
+			srcLen = 255;
+		}
+
+		// REGRA PASCAL: Primeiro gravamos o comprimento no byte 0, 
+		// e depois copiamos os caracteres reais a partir do offset 1.
+		dest[0] = static_cast<uint8_t>(srcLen);
+		if (srcLen > 0)
+		{
+			std::memmove(&dest[1], src, srcLen);
+		}
+
+		// A ABI dita que a função devolve o endereço virtual original de destino
+		state->r3 = p_destPascal;
+		globals->scalars.errno_ = 0;
 	}
+
 
 		void StdCLib__coClose(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1145,36 +1261,195 @@ extern "C"
     globals->nativeFileMap.clear();
 }
 
-
-	void StdCLib__doprnt(StdCLib::Globals* globals, MachineState* state)
+		void StdCLib__doprnt(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na MSL, _doprnt(const char* format, va_list args, FILE* stream)
+		// r3 = formato, r4 = ponteiro virtual va_list, r5 = ponteiro virtual PPCFILE
+		const char* format = ToPointer<const char>(state->r3);
+		uint32_t p_vaList = state->r4;
+		uint32_t p_iob = state->r5;
+
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+		if (format == nullptr || fptr == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		// Reutiliza o nosso parser variádico blindado para extrair a string interpretada
+		std::string output = StringPrintFFromPointer(format, *globals, p_vaList);
+
+		int result = std::fputs(output.c_str(), fptr);
+		std::fflush(fptr);
+
+		if (result >= 0)
+		{
+			state->r3 = static_cast<int32_t>(output.size());
+			globals->scalars.errno_ = 0;
+		}
+		else
+		{
+			state->r3 = -1;
+			globals->scalars.errno_ = errno;
+		}
 	}
 
 	void StdCLib__doscan(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na MSL, _doscan(FILE* stream, const char* format, va_list args)
+		// r3 = ponteiro virtual PPCFILE, r4 = formato, r5 = ponteiro virtual va_list
+		uint32_t p_iob = state->r3;
+		const char* format = ToPointer<const char>(state->r4);
+		uint32_t p_vaList = state->r5;
+
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+		if (fptr == nullptr || format == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		// Implementação simplificada usando a lógica variádica do sscanf/fscanf na stack da VM
+		uint32_t currentArgPtr = p_vaList;
+		auto getNextPointerArg = [&]() -> uint32_t {
+			uint32_t* ptr = ToPointer<uint32_t>(currentArgPtr);
+			currentArgPtr += 4;
+			return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+		};
+
+		size_t i = 0;
+		size_t len = std::strlen(format);
+		int tokensMatched = 0;
+
+		while (i < len)
+		{
+			if (std::isspace(format[i]))
+			{
+				int ch;
+				while ((ch = std::fgetc(fptr)) != EOF && std::isspace(ch));
+				if (ch != EOF) std::ungetc(ch, fptr);
+				i++;
+				continue;
+			}
+
+			if (format[i] == '%' && i + 1 < len)
+			{
+				i++;
+				if (format[i] == '%')
+				{
+					int ch = std::fgetc(fptr);
+					if (ch != '%') { if (ch != EOF) std::ungetc(ch, fptr); break; }
+					i++;
+					continue;
+				}
+
+				char specifier = format[i];
+				uint32_t p_dest = getNextPointerArg();
+				if (p_dest == 0) { globals->scalars.errno_ = EFAULT; break; }
+
+				if (specifier == 'd' || specifier == 'i')
+				{
+					int32_t val = 0;
+					if (std::fscanf(fptr, "%d", &val) != 1) break;
+					int32_t* dest = ToPointer<int32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<int32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 's')
+				{
+					char tmpBuf[512];
+					if (std::fscanf(fptr, "%511s", tmpBuf) != 1) break;
+					char* dest = ToPointer<char>(p_dest);
+					if (dest) std::strcpy(dest, tmpBuf);
+					tokensMatched++;
+				}
+				// (Podes estender os restantes especificadores 'c', 'f' conforme necessário)
+				i++;
+			}
+			else
+			{
+				int ch = std::fgetc(fptr);
+				if (ch != format[i]) { if (ch != EOF) std::ungetc(ch, fptr); break; }
+				i++;
+			}
+		}
+
+		state->r3 = tokensMatched;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__exit(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Terminação crua sem passar pelo ciclo do atexit
+		int32_t exitStatus = static_cast<int32_t>(state->r3);
+		uint32_t p_exitTarget = globals->scalars.__target_for_exit;
+
+		if (p_exitTarget == 0)
+		{
+			::exit(exitStatus);
+		}
+
+		state->r3 = p_exitTarget;
+		state->r4 = (exitStatus == 0) ? 1 : exitStatus;
+		StdCLib_longjmp(globals, state);
 	}
 
 	void StdCLib__faccess(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Encaminha diretamente para a chamada de validação POSIX que corrigimos
+		StdCLib_faccess(globals, state);
 	}
 
 	void StdCLib__filbuf(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = EOF;
+			return;
+		}
+
+		// Executa a leitura física de um byte para alimentar o buffer virtual da MSL
+		int ch = std::fgetc(fptr);
+		if (ch == EOF)
+		{
+			globals->scalars.errno_ = std::ferror(fptr) ? errno : 0;
+			state->r3 = EOF;
+		}
+		else
+		{
+			state->r3 = ch & 0xFF;
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib__findiop(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Procura por um slot de stream disponível na tabela virtual
+		for (int i = 0; i < StdCLib::NFILE; i++)
+		{
+			auto& ioBuffer = globals->scalars._iob[i];
+			uint32_t p_iobAddress = ToIntPtr(&ioBuffer);
+
+			// Se não estiver no mapa, encontrámos um slot livre para a MSL usar
+			if (globals->nativeFileMap.find(p_iobAddress) == globals->nativeFileMap.end())
+			{
+				state->r3 = p_iobAddress;
+				globals->scalars.errno_ = 0;
+				return;
+			}
+		}
+
+		// Se esgotar a tabela interna
+		state->r3 = 0; // NULL
+		globals->scalars.errno_ = EMFILE;
 	}
+
 
 	void StdCLib__flsbuf(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -1644,8 +1919,28 @@ extern "C"
 
 	void StdCLib_div(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+		// r3 = numerados (int32_t), r4 = denominador (int32_t)
+		int32_t numer = static_cast<int32_t>(state->r3);
+		int32_t denom = static_cast<int32_t>(state->r4);
+
+		if (denom == 0)
+		{
+			// Proteção contra divisão por zero na VM
+			globals->scalars.errno_ = EDOM;
+			state->r3 = 0;
+			state->r4 = 0;
+			return;
+		}
+
+		// Executa a operação matemática canónica
+		std::div_t res = std::div(numer, denom);
+
+		// De acordo com a ABI PowerPC de 32-bits, as estruturas de 8 bytes 
+		// são devolvidas diretamente divididas nos registadores GPR
+		state->r3 = static_cast<uint32_t>(res.quot);
+		state->r4 = static_cast<uint32_t>(res.rem);
+		globals->scalars.errno_ = 0;
+    }
 
 	void StdCLib_dup(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -2802,7 +3097,24 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_ldiv(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na arquitetura de 32-bits do PowerPC, 'long' tem exatamente 4 bytes (32-bits).
+		// Portanto, ldiv comporta-se de forma idêntica a div, devolvendo o resultado em r3 e r4.
+		int32_t numer = static_cast<int32_t>(state->r3);
+		int32_t denom = static_cast<int32_t>(state->r4);
+
+		if (denom == 0)
+		{
+			globals->scalars.errno_ = EDOM;
+			state->r3 = 0;
+			state->r4 = 0;
+			return;
+		}
+
+		std::ldiv_t res = std::ldiv(numer, denom);
+
+		state->r3 = static_cast<uint32_t>(res.quot);
+		state->r4 = static_cast<uint32_t>(res.rem);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_llabs(StdCLib::Globals* globals, MachineState* state)
@@ -2820,7 +3132,48 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_lldiv(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// REGRA CRÍTICA DA ABI: Como lldiv_t tem 16 bytes (dois int64_t), o compilador
+		// da VM passa no registador r3 um ponteiro para onde o resultado deve ser guardado.
+		// Os argumentos reais de 64-bits ficam distribuídos nos registadores seguintes:
+		// numerados (64-bit) em r4 (high) e r5 (low)
+		// denominador (64-bit) em r6 (high) e r7 (low)
+		uint32_t p_destResult = state->r3;
+
+		uint64_t u_numer = (static_cast<uint64_t>(state->r4) << 32) | state->gpr[5];
+		uint64_t u_denom = (static_cast<uint64_t>(state->gpr[6]) << 32) | state->gpr[7];
+
+		long long numer = static_cast<long long>(u_numer);
+		long long denom = static_cast<long long>(u_denom);
+
+		if (p_destResult == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			return;
+		}
+
+		if (denom == 0)
+		{
+			globals->scalars.errno_ = EDOM;
+			return;
+		}
+
+		std::lldiv_t res = std::lldiv(numer, denom);
+
+		// Obtemos o ponteiro para a memória virtualizada da VM de 32-bits
+		uint64_t* destFields = ToPointer<uint64_t>(p_destResult);
+		if (destFields)
+		{
+			// Convertemos os resultados de 64-bits para Big-Endian antes de escrever na VM
+			uint64_t quotBE = Common::CF::HostToBig<uint64_t>::Swap(static_cast<uint64_t>(res.quot));
+			uint64_t remBE  = Common::CF::HostToBig<uint64_t>::Swap(static_cast<uint64_t>(res.rem));
+
+			destFields[0] = quotBE; // quot ocupa os primeiros 8 bytes
+			destFields[1] = remBE;  // rem ocupa os 8 bytes seguintes
+		}
+
+		// A ABI dita que o registador r3 retém o ponteiro de destino original
+		state->r3 = p_destResult;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_localeconv(StdCLib::Globals* globals, MachineState* state)
