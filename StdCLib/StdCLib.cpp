@@ -576,6 +576,21 @@ namespace StdCLib
 		
 		return t;
 	}
+
+    // Função auxiliar interna para converter FSSpec virtual para um caminho Unix no Host
+		std::string FSSpecToHostPath(const PEF::FSSpec* spec)
+		{
+			if (spec == nullptr) return "";
+			
+			// O primeiro byte do array 'name' dita o comprimento da Pascal String
+			uint8_t len = spec->name[0];
+			if (len > 63) len = 63; // Proteção contra corrupção Str63
+			
+			std::string fileName(reinterpret_cast<const char*>(&spec->name[1]), len);
+			
+			// Mapeamento simples de Sandbox: todos os ficheiros FSSpec operam na pasta local do emulador
+			return "./" + fileName;
+		}
 }
 
 #pragma mark -
@@ -878,7 +893,7 @@ extern "C"
         PEF::TransitionVector targetRoutine = globals->atExit.back();
         globals->atExit.pop_back();
 
-        if (targetRoutine.pc != 0)
+        if (targetRoutine.EntryPoint != 0)
         {
             // Salva o estado atual crítico de fluxo para onde o interpretador deve regressar
             uint32_t originalPC = state->pc;
@@ -886,13 +901,9 @@ extern "C"
             uint32_t originalR2 = state->r2; // O TOC original
 
             // Prepara a ABI da VM para executar a rotina clássica de limpeza
-            state->pc = targetRoutine.pc;
-            state->r2 = targetRoutine.toc;  // Atualiza o Table of Contents da biblioteca alvo
-            
-            // Definimos o Link Register (LR) para uma armadilha ou endereço de retorno nulo.
-            // Isto força o interpretador virtual a parar a execução assim que a subrotina
-            // clássica fizer o desvio de retorno ('blr').
-            state->lr = 0; 
+            state->pc = targetRoutine.EntryPoint;      // Alterado de .pc para .EntryPoint
+            state->r2 = targetRoutine.TableOfContents; // Alterado de .toc para .TableOfContents
+            state->lr = 0;
 
             try 
             {
@@ -2049,17 +2060,96 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_FSp_creat(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
+		// No Mac OS Clássico, creat recebia também o Mac Creator (r4) e o FileType (r5)
+		
+		if (spec == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+		
+		std::string hostPath = FSSpecToHostPath(spec);
+		
+		// No host, a criação pura equivale a um open com O_CREAT | O_WRONLY | O_TRUNC
+		int fd = ::open(hostPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0666);
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1; // Retorna erro clássico (ex: dirNfErr ou wPrErr)
+		}
 	}
-
+		
 	void StdCLib_FSp_faccess(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
+		uint32_t rawMode = state->r4;
+		
+		if (spec == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+		
+		std::string hostPath = FSSpecToHostPath(spec);
+		
+		int nativeMode = F_OK;
+		if (rawMode & 0x04) nativeMode |= R_OK;
+		if (rawMode & 0x02) nativeMode |= W_OK;
+		if (rawMode & 0x01) nativeMode |= X_OK;
+		
+		int result = ::access(hostPath.c_str(), nativeMode);
+		if (result == 0)
+		{
+			state->r3 = 0; // Acesso permitido
+			globals->scalars.errno_ = 0;
+		}
+		else
+		{
+			state->r3 = -1;
+			globals->scalars.errno_ = errno;
+		}
 	}
 
 	void StdCLib_FSp_fopen(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
+		uint32_t p_mode = state->r4; // Modo de abertura (ex: "r", "wb")
+		
+		if (spec == nullptr || p_mode == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0;
+			return;
+		}
+		
+		std::string hostPath = FSSpecToHostPath(spec);
+		
+		// Invocamos a lógica segura de abertura que já corrigimos no StdCLib_fopen.
+		// Precisamos de simular os argumentos nos registadores esperados por ela.
+		uint32_t originalR3 = state->r3;
+		uint32_t originalR4 = state->r4;
+		
+		// Alocamos temporariamente o caminho convertido na VM para o fopen ler com segurança
+		void* vmPathBuf = globals->allocator.Allocate(hostPath.length() + 1, 1);
+		if (vmPathBuf == nullptr)
+		{
+			globals->scalars.errno_ = ENOMEM;
+			state->r3 = 0;
+			return;
+		}
+		std::memcpy(vmPathBuf, hostPath.c_str(), hostPath.length() + 1);
+		
+		// Mapeia para os registadores e executa
+		state->r3 = globals->allocator.ToIntPtr(vmPathBuf);
+		state->r4 = p_mode;
+		
+		StdCLib_fopen(globals, state);
+		
+		// Limpeza do buffer temporário e restauro de contexto
+		globals->allocator.Deallocate(vmPathBuf);
 	}
 
 	void StdCLib_FSp_freopen(StdCLib::Globals* globals, MachineState* state)
@@ -2079,7 +2169,27 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_FSp_remove(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
+		if (spec == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+		
+		std::string hostPath = FSSpecToHostPath(spec);
+		
+		int result = std::remove(hostPath.c_str());
+		if (result != 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = 0; // noErr
+		}
 	}
 
 	void StdCLib_FSp_rename(StdCLib::Globals* globals, MachineState* state)
@@ -2089,7 +2199,8 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_FSp_unlink(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No ecossistema POSIX do Host, unlink e remove para ficheiros regulares são idênticos
+		StdCLib_FSp_remove(globals, state);
 	}
 
 	void StdCLib_FSSpec2Path_Long(StdCLib::Globals* globals, MachineState* state)
