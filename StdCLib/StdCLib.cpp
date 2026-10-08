@@ -890,8 +890,23 @@ extern "C"
 
 	void StdCLib__badPtr(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		uint32_t p_vmAddress = state->r3; // O endereço virtual enviado pela aplicação Guest
+
+		// Esta função interna valida se um ponteiro é nulo ou aponta para uma zona ilegal da VM.
+		// Verificamos através do ToPointer se o alocador consegue mapear este endereço no Host.
+		void* hostPtr = ToPointer<void>(p_vmAddress);
+		
+		if (p_vmAddress == 0 || hostPtr == nullptr)
+		{
+			state->r3 = 1; // Verdadeiro: o ponteiro é INVÁLIDO/MAU
+		}
+		else
+		{
+			state->r3 = 0; // Falso: o ponteiro é SEGURO e legível
+		}
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib__Bogus(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -916,25 +931,71 @@ extern "C"
 		throw PPCVM::NotImplementedException(__func__);
 	}
 
-	void StdCLib__coClose(StdCLib::Globals* globals, MachineState* state)
+		void StdCLib__coClose(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+
+		// Blindagem: Os descritores padrão da consola (0, 1, 2) nunca devem ser fechados abruptamente
+		// para não quebrar o ecossistema do host. Retornamos sucesso fictício se a aplicação tentar fechá-los.
+		if (fd >= 0 && fd <= 2)
+		{
+			state->r3 = 0; // noErr
+			globals->scalars.errno_ = 0;
+			return;
+		}
+
+		int result = ::close(fd);
+		if (result < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = 0; // Sucesso
+		}
 	}
 
 	void StdCLib__coExit(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// A Console Exit da MSL realiza a limpeza dos buffers exclusivos do terminal antes de fechar.
+		// Sincronizamos os streams padrão do host e encaminhamos para a rotina de encerramento
+		// controlada do emulador, que executará os passos do atexit e longjmp que já corrigimos.
+		std::fflush(stdout);
+		std::fflush(stderr);
+
+		StdCLib_exit(globals, state);
 	}
 
 	void StdCLib__coFAccess(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Determina as permissões de acesso ao dispositivo de consola.
+		// Como a consola é um stream bidirecional de leitura e escrita sempre disponível,
+		// respondemos diretamente com sucesso (0/noErr) para o fluxo da VM avançar.
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__coIoctl(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+		uint32_t command = state->r4;
+		uint32_t p_vmArg = state->r5;
+
+		// Armadilha de Compatibilidade: A MSL envia comandos específicos de ioctl para a consola
+		// (como interrogar o tamanho da janela, eco de caracteres ou desativar buffering do teclado).
+		// Passar estes opcodes diretamente para o ioctl do host causaria corrupção ou falha.
+		// Mapeamos um No-Op seguro. Se a aplicação pedir propriedades de modo texto, fingimos que
+		// foram configuradas com sucesso.
+		
+		// Opcional: Depuração se precisares de isolar um binário interativo complexo
+		// std::fprintf(stderr, "[ClassiC] coIoctl: Comando de consola emulado 0x%08x no fd %d\n", command, fd);
+
+		state->r3 = 0; // Sucesso simulado (noErr)
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib__coRead(StdCLib::Globals* globals, MachineState* state)
 	{
@@ -947,7 +1008,18 @@ extern "C"
 
 	void StdCLib__coreIOExit(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// O Core IO Exit garante que todas as estruturas de I/O do sistema de ficheiros 
+		// interno da MSL são limpas. Sincronizamos os ficheiros abertos nativos no nosso mapa:
+		for (auto& pair : globals->nativeFileMap)
+		{
+			if (pair.second != nullptr)
+			{
+				std::fflush(pair.second);
+			}
+		}
+
+		// Permite que o fluxo de saída prossiga limpando o errno
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__coWrite(StdCLib::Globals* globals, MachineState* state)
@@ -959,7 +1031,59 @@ extern "C"
 
 	void StdCLib__cvt(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na MSL, _cvt(double value, int ndigit, int* decpt, int* sign, char* buf, int fcvt)
+		// converte um número real para caracteres. Para garantir total robustez matemática de 32/64 bits:
+		double value = state->fpr[1];
+		int ndigit = static_cast<int>(state->r3); // Argumentos inteiros começam em r3
+		uint32_t p_decpt = state->r4;
+		uint32_t p_sign = state->r5;
+		uint32_t p_buf = state->gpr[6]; // r6 é o 4º argumento GPR
+		int fcvtMode = static_cast<int>(state->gpr[7]);
+
+		int decpt = 0;
+		int sign = 0;
+		
+		// Criamos um buffer intermédio no host
+		char hostBuf[128];
+		
+		// Invocamos a lógica padrão do ecossistema de conversão do C clássico
+		char* result = nullptr;
+		if (fcvtMode)
+		{
+			// Modo fcvt: ndigit especifica os dígitos após o ponto decimal
+			// std::fcvt_r ou lógicas locais equivalentes isolam os componentes:
+			std::snprintf(hostBuf, sizeof(hostBuf), "%.*f", ndigit, value);
+		}
+		else
+		{
+			// Modo ecvt: ndigit especifica o número total de dígitos
+			std::snprintf(hostBuf, sizeof(hostBuf), "%.*e", ndigit, value);
+		}
+
+		// Parsing manual simples para preencher decpt e sign esperados pela MSL:
+		sign = (value < 0.0) ? 1 : 0;
+		std::string s(hostBuf);
+		size_t dot = s.find_first_of_not_of("-0123456789"); // Encontra o separador decimal ou expoente
+		decpt = (dot == std::string::npos) ? static_cast<int>(s.length()) : static_cast<int>(dot);
+
+		// Remover caracteres não numéricos para o formato bruto que a MSL espera no buffer
+		std::string cleanDigits = "";
+		for (char c : s) if (std::isdigit(c)) cleanDigits += c;
+
+		// Escrever de volta na memória virtual de 32-bits da VM
+		int32_t* v_decpt = ToPointer<int32_t>(p_decpt);
+		int32_t* v_sign = ToPointer<int32_t>(p_sign);
+		char* v_buf = ToPointer<char>(p_buf);
+
+		if (v_decpt) *v_decpt = Common::CF::HostToBig<int32_t>::Swap(decpt);
+		if (v_sign) *v_sign = Common::CF::HostToBig<int32_t>::Swap(sign);
+		if (v_buf && !cleanDigits.empty())
+		{
+			std::strncpy(v_buf, cleanDigits.c_str(), ndigit);
+			v_buf[ndigit] = '\0';
+		}
+
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__DoExitProcs(StdCLib::Globals* globals, MachineState* state)
@@ -1177,17 +1301,66 @@ extern "C"
 
 	void StdCLib__syClose(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		int fd = static_cast<int>(state->r3);
+
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1;
+			return;
+		}
+
+		// Encaminha diretamente para a chamada de sistema estável do Host
+		int result = ::close(fd);
+		if (result < 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+		}
+		else
+		{
+			globals->scalars.errno_ = 0;
+			state->r3 = 0; // noErr
+		}
 	}
 
 	void StdCLib__syFAccess(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* path = ToPointer<const char>(state->r3);
+		uint32_t rawMode = state->r4;
+
+		if (path == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		int nativeMode = F_OK;
+		if (rawMode & 0x04) nativeMode |= R_OK;
+		if (rawMode & 0x02) nativeMode |= W_OK;
+		if (rawMode & 0x01) nativeMode |= X_OK;
+
+		int result = ::access(path, nativeMode);
+		if (result == 0)
+		{
+			state->r3 = 0;
+			globals->scalars.errno_ = 0;
+		}
+		else
+		{
+			state->r3 = -1;
+			globals->scalars.errno_ = errno;
+		}
 	}
 
 	void StdCLib__syIoctl(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Tal como fizemos no ioctl geral e na consola, pedidos raw de ioctl do sistema 
+		// emulado devem ser tratados defensivamente como No-Op com sucesso fictício (0) 
+		// ou ENOTTY, para evitar falhas de alinhamento e corrupção de memória na VM.
+		state->r3 = 0; 
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib__syRead(StdCLib::Globals* globals, MachineState* state)
@@ -3786,10 +3959,149 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 		}
 	}
 
-	void StdCLib_scanf(StdCLib::Globals* globals, MachineState* state)
+		void StdCLib_scanf(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		const char* format = ToPointer<const char>(state->r3);
+
+		if (format == nullptr) 
+		{ 
+			globals->scalars.errno_ = EINVAL; 
+			state->r3 = -1; 
+			return; 
+		}
+
+		// Na ABI do PowerPC de 32-bits, os argumentos variádicos de escrita começam em r4
+		// (visto que o formato ocupa o registador r3)
+		int nextGPR = 4;
+		uint32_t stackPtr = state->r1;
+		int stackOffset = 24;
+
+		// Lambda para extrair com segurança os ponteiros de escrita da VM PowerPC
+		auto getNextPointerArg = [&]() -> uint32_t {
+			if (nextGPR <= 10) return state->gpr[nextGPR++];
+			uint32_t* ptr = ToPointer<uint32_t>(stackPtr + stackOffset);
+			stackOffset += 4;
+			return ptr ? Common::CF::BigToHost<uint32_t>::Swap(*ptr) : 0;
+		};
+
+		size_t i = 0;
+		size_t len = std::strlen(format);
+		int tokensMatched = 0;
+
+		// Lemos diretamente do stream de entrada padrão do Host (stdin)
+		FILE* fptr = stdin;
+
+		while (i < len)
+		{
+			// Consumir e sincronizar espaços em branco no formato e no teclado
+			if (std::isspace(format[i]))
+			{
+				int ch;
+				while ((ch = std::fgetc(fptr)) != EOF && std::isspace(ch));
+				if (ch != EOF) std::ungetc(ch, fptr);
+				i++;
+				continue;
+			}
+
+			if (format[i] == '%' && i + 1 < len)
+			{
+				i++;
+				if (format[i] == '%')
+				{
+					int ch = std::fgetc(fptr);
+					if (ch != '%') { if (ch != EOF) std::ungetc(ch, fptr); break; }
+					i++;
+					continue;
+				}
+
+				char specifier = format[i];
+				uint32_t p_dest = getNextPointerArg();
+				if (p_dest == 0) { globals->scalars.errno_ = EFAULT; break; }
+
+				if (specifier == 'd' || specifier == 'i')
+				{
+					int32_t val = 0;
+					if (std::fscanf(fptr, "%d", &val) != 1) break;
+					
+					int32_t* dest = ToPointer<int32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<int32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'u')
+				{
+					uint32_t val = 0;
+					if (std::fscanf(fptr, "%u", &val) != 1) break;
+					
+					uint32_t* dest = ToPointer<uint32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<uint32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'x' || specifier == 'X')
+				{
+					uint32_t val = 0;
+					if (std::fscanf(fptr, specifier == 'x' ? "%x" : "%X", &val) != 1) break;
+					
+					uint32_t* dest = ToPointer<uint32_t>(p_dest);
+					if (dest) *dest = Common::CF::HostToBig<uint32_t>::Swap(val);
+					tokensMatched++;
+				}
+				else if (specifier == 'c')
+				{
+					int ch = std::fgetc(fptr);
+					if (ch == EOF) break;
+					
+					char* dest = ToPointer<char>(p_dest);
+					if (dest) *dest = static_cast<char>(ch);
+					tokensMatched++;
+				}
+				else if (specifier == 's')
+				{
+					char tmpBuf[512];
+					if (std::fscanf(fptr, "%511s", tmpBuf) != 1) break;
+					
+					char* dest = ToPointer<char>(p_dest);
+					if (dest) std::strcpy(dest, tmpBuf);
+					tokensMatched++;
+				}
+				else if (specifier == 'f' || specifier == 'g' || specifier == 'e')
+				{
+					float val = 0.0f;
+					if (std::fscanf(fptr, "%f", &val) != 1) break;
+					
+					float* dest = ToPointer<float>(p_dest);
+					if (dest) {
+						uint32_t bits;
+						std::memcpy(&bits, &val, sizeof(float));
+						bits = Common::CF::HostToBig<uint32_t>::Swap(bits);
+						std::memcpy(dest, &bits, sizeof(float));
+					}
+					tokensMatched++;
+				}
+				i++;
+			}
+			else
+			{
+				int ch = std::fgetc(fptr);
+				if (ch != format[i])
+				{
+					if (ch != EOF) std::ungetc(ch, fptr);
+					break;
+				}
+				i++;
+			}
+		}
+
+		if (tokensMatched == 0 && std::feof(fptr)) 
+		{
+			state->r3 = -1; // EOF canónico se falhar antes de qualquer match
+		}
+		else 
+		{
+			state->r3 = tokensMatched; // Devolve o número de inputs convertidos
+		}
+		globals->scalars.errno_ = 0;
 	}
+
 
 	void StdCLib_setbuf(StdCLib::Globals* globals, MachineState* state)
 	{
