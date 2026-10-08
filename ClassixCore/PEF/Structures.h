@@ -245,6 +245,14 @@ namespace PEF
 		Common::UInt32 EntryPoint;
 		Common::UInt32 TableOfContents;
 	};
+
+	struct FSSpec
+	{
+		Common::SInt16 vRefNum; // Número de referência do volume (Big-Endian)
+		Common::SInt32 parID;   // ID do Diretório Pai (Big-Endian)
+		uint8_t        name[64]; // Str63: 1 byte de tamanho (Pascal) + até 63 caracteres
+	} __attribute__((packed));
+
 }
 
 #endif /* defined(__pefdump__PEFContaierHeader__) */
