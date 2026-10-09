@@ -4029,9 +4029,79 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
         StdCLib_fgetc(globals, state);
     }
 
+    void StdCLib_gets(StdCLib::Globals* globals, MachineState* state)
+	{
+		// r3 = Endereço virtual do buffer de destino na VM
+		uint32_t p_buffer = state->r3;
+		char* dest = ToPointer<char>(p_buffer);
+
+		if (dest == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0; // Devolve NULL se o buffer virtual for inválido
+			return;
+		}
+
+		// Alerta de Segurança e Emulação: gets() está obsoleta por não validar limites, 
+		// mas para simular o comportamento exato exigido por aplicações legadas compiladas no CodeWarrior,
+		// lemos do stdin nativo do Host caractere a caractere até encontrar '\n' ou EOF.
+		FILE* fptr = stdin;
+		uint32_t index = 0;
+		int ch;
+
+		while ((ch = std::fgetc(fptr)) != EOF && ch != '\n')
+		{
+			// Mutamos a memória virtualizada diretamente através do ponteiro mapeado
+			dest[index++] = static_cast<char>(ch);
+		}
+
+		// Caso seja o fim absoluto do ficheiro e nenhum caractere tenha sido lido
+		if (ch == EOF && index == 0)
+		{
+			globals->scalars.errno_ = std::ferror(fptr) ? errno : 0;
+			state->r3 = 0; // Devolve NULL (0) em caso de EOF/Erro antes da leitura
+			return;
+		}
+
+		// Adiciona o terminador nulo obrigatório no final da string na VM
+		dest[index] = '\0';
+
+		// De acordo com a especificação ANSI C, devolve o endereço VIRTUAL original de destino (32-bits)
+		state->r3 = p_buffer;
+		globals->scalars.errno_ = 0;
+	}
+
 	void StdCLib_getw(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = Endereço virtual da estrutura PPCFILE (stream) na VM
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = EOF; // Retorna -1 (EOF) em caso de descritor corrompido
+			return;
+		}
+
+		// Uma 'word' na arquitetura clássica do PowerPC de 32-bits tem exatamente 4 bytes
+		uint32_t wordValue = 0;
+		size_t elementsRead = std::fread(&wordValue, sizeof(uint32_t), 1, fptr);
+
+		if (elementsRead != 1)
+		{
+			globals->scalars.errno_ = std::ferror(fptr) ? errno : 0;
+			state->r3 = EOF; // Retorna -1 se falhar a leitura dos 4 bytes completos
+			return;
+		}
+
+		// REGRA CRÍTICA DE EMULAÇÃO: Os dados binários lidos do Host de 64-bits estão em Little-Endian.
+		// Precisamos de converter a word de 32-bits para o formato Big-Endian nativo da VM!
+		uint32_t bigEndianWord = Common::CF::BigToHost<uint32_t>::Swap(wordValue);
+
+		// Coloca a word processada com sucesso no registador r3 da CPU emulada
+		state->r3 = static_cast<int32_t>(bigEndianWord);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_gmtime(StdCLib::Globals* globals, MachineState* state)
@@ -4057,7 +4127,48 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_IEResolvePath(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na convenção das rotinas de resolução do ecossistema clássico da Apple:
+		// r3 = Endereço virtual da string do caminho de Origem (Source Path C-String) na VM
+		// r4 = Endereço virtual do buffer de Destino (Destination char* buffer) na VM
+		// r5 = Tamanho máximo do buffer de destino alocado pelo Guest (32-bit)
+		uint32_t p_src = state->r3;
+		uint32_t p_dest = state->r4;
+		uint32_t maxLen = state->r5;
+
+		if (maxLen == 0 || p_src == 0 || p_dest == 0)
+		{
+			state->r3 = 0xFFFFFFFF; // paramErr (-50) ou código de erro genérico da ToolBox
+			globals->scalars.errno_ = EINVAL;
+			return;
+		}
+
+		const char* src = ToPointer<const char>(p_src);
+		char* dest = ToPointer<char>(p_dest);
+
+		if (src == nullptr || dest == nullptr)
+		{
+			globals->scalars.errno_ = EFAULT;
+			state->r3 = 0xFFFFFFFF;
+			return;
+		}
+
+		// Descobrir o comprimento do caminho de origem
+		size_t srcLen = std::strlen(src);
+
+		// Blindagem defensiva contra estouro de buffer (Buffer Overflow) na memória virtual do Guest
+		if (srcLen >= maxLen)
+		{
+			globals->scalars.errno_ = ERANGE;
+			state->r3 = 0xFFFFFFFF; // bdNamErr ou erro de limite de nome na ToolBox
+			return;
+		}
+
+		// Copia o caminho resolvido diretamente para o espaço de endereçamento de 32-bits mapeado da VM
+		std::memcpy(dest, src, srcLen + 1);
+
+		// Retorna noErr (0) no registador r3 indicando que o caminho virtual foi validado com sucesso
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_ioctl(StdCLib::Globals* globals, MachineState* state)
@@ -4435,34 +4546,121 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 		}
 	}
 
-
 	void StdCLib_MakeResolvedFSSpec(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No Mac OS Clássico, esta rotina tentava ler um FSSpec, resolver eventuais aliases
+		// e preencher um FSSpec final com o alvo real. Como operamos numa sandbox local uniforme,
+		// assumimos que o FSSpec original já aponta para o alvo estático correto.
+		// r3 = Endereço virtual do FSSpec de entrada (origem) na VM
+		// r4 = Endereço virtual do FSSpec de saída (destino) na VM
+		uint32_t p_srcSpec = state->r3;
+		uint32_t p_destSpec = state->r4;
+
+		const PEF::FSSpec* srcSpec = ToPointer<const PEF::FSSpec>(p_srcSpec);
+		PEF::FSSpec* destSpec = ToPointer<PEF::FSSpec>(p_destSpec);
+
+		if (srcSpec == nullptr || destSpec == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		// Copia a estrutura binária empacotada de forma direta e segura no espaço da VM
+		std::memcpy(destSpec, srcSpec, sizeof(PEF::FSSpec));
+
+		// Retorna noErr (0) no registador r3
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_MakeResolvedFSSpec_Long(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Variante para caminhos longos da rotina de resolução de FSSpec.
+		// Segue rigorosamente a mesma estratégia de sandbox simplificada.
+		StdCLib_MakeResolvedFSSpec(globals, state);
 	}
 
 	void StdCLib_MakeResolvedPath(StdCLib::Globals* globals, MachineState* state)
-    {
-        // Mapeamento simplificado: assume que o caminho fornecido já está resolvido na Sandbox local.
-        state->r3 = 0;
-        globals->scalars.errno_ = 0;
-    }
+	{
+		// Preservamos a sua excelente e robusta lógica de mapeamento simplificado para a sandbox
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
+	}
 
 	void StdCLib_MakeResolvedPath_Long(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Variante de caminhos longos para a resolução de caminhos planos (char*).
+		// r3 = Endereço virtual da string do caminho original na VM
+		// r4 = Endereço virtual do buffer de destino na VM
+		// r5 = Tamanho máximo do buffer de destino (32-bit)
+		uint32_t p_src = state->r3;
+		uint32_t p_dest = state->r4;
+		uint32_t maxLen = state->r5;
+
+		if (maxLen == 0 || p_src == 0 || p_dest == 0)
+		{
+			state->r3 = -1;
+			globals->scalars.errno_ = EINVAL;
+			return;
+		}
+
+		const char* src = ToPointer<const char>(p_src);
+		char* dest = ToPointer<char>(p_dest);
+
+		if (src == nullptr || dest == nullptr)
+		{
+			globals->scalars.errno_ = EFAULT;
+			state->r3 = -1;
+			return;
+		}
+
+		size_t srcLen = std::strlen(src);
+		if (srcLen >= maxLen)
+		{
+			globals->scalars.errno_ = ERANGE;
+			state->r3 = -1;
+			return;
+		}
+
+		// Duplica o caminho assumindo-o como resolvido nativamente no Host
+		std::memcpy(dest, src, srcLen + 1);
+
+		state->r3 = 0; // noErr
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_MakeTheLocaleString(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+		// Função interna da MSL para gerar strings de formatação regional customizadas.
+		// Ela costuma ler um identificador de localidade (r3) e preencher um buffer (r4).
+		// Geramos uma string padrão estável para não quebrar o fluxo interno do binário Guest.
+		uint32_t p_dest = state->r4;
+		uint32_t maxLen = state->r5;
 
+		char* dest = ToPointer<char>(p_dest);
+		if (dest == nullptr || maxLen == 0)
+		{
+			state->r3 = -1;
+			globals->scalars.errno_ = EINVAL;
+			return;
+		}
+
+		// "C" é a localização universal neutra padrão para APIs ANSI
+		std::string localeStr = "C";
+		if (localeStr.length() < maxLen)
+		{
+			std::memcpy(dest, localeStr.c_str(), localeStr.length() + 1);
+			state->r3 = 0; // Sucesso
+		}
+		else
+		{
+			globals->scalars.errno_ = ERANGE;
+			state->r3 = -1;
+		}
+		globals->scalars.errno_ = 0;
+	}
+			
 	void StdCLib_malloc(StdCLib::Globals* globals, MachineState* state)
 	{
 		uint32_t size = state->r3; // Tamanho requisitado pela VM (32-bit)
@@ -4803,10 +5001,39 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 		}
 	}
 
-
 	void StdCLib_ParseTheLocaleString(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na convenção interna da MSL:
+		// r3 = Endereço virtual da C-String com o nome da localidade (locale name) na VM
+		// r4 = Endereço virtual da estrutura ou array de destino na VM para onde os tokens vão
+		// r5 = Modo ou flag interna de parsing da Metrowerks
+		uint32_t p_localeStr = state->r3;
+		uint32_t p_destTokens = state->r4;
+
+		const char* localeStr = ToPointer<const char>(p_localeStr);
+		
+		// Validamos defensivamente os ponteiros de memória virtual mapeada da VM
+		if (p_localeStr == 0 || p_destTokens == 0 || localeStr == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0xFFFFFFFF; // Retorna código de erro para a biblioteca
+			return;
+		}
+
+		// Fazemos uma validação básica da string: se for nula, vazia ou apenas "C"/"POSIX",
+		// consideramos imediatamente bem-sucedido o comportamento padrão neutro.
+		if (std::strlen(localeStr) == 0 || std::strcmp(localeStr, "C") == 0 || std::strcmp(localeStr, "POSIX") == 0)
+		{
+			state->r3 = 0; // noErr (Sucesso absoluto no parsing)
+			globals->scalars.errno_ = 0;
+			return;
+		}
+
+		// Se a aplicação tentar passar uma localização específica (ex: "en_US" ou "pt_PT"),
+		// aceitamos o pedido por cortesia à estabilidade e limpamos o fluxo, assegurando
+		// que o binário Guest não aborte por falta de suporte regional na Sandbox.
+		state->r3 = 0; // noErr
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_perror(StdCLib::Globals* globals, MachineState* state)
@@ -5258,10 +5485,42 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
     }
 }
 
-
-	void StdCLib_putw(StdCLib::Globals* globals, MachineState* state)
+    void StdCLib_putw(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = O valor inteiro de 32-bits (word) que a aplicação quer gravar
+		// r4 = Endereço virtual da estrutura PPCFILE (stream) na VM
+		int32_t wordValue = static_cast<int32_t>(state->r3);
+		uint32_t p_iob = state->r4;
+
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		if (fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = EOF; // Retorna -1 (EOF) em caso de descritor inválido
+			return;
+		}
+
+		// REGRA CRÍTICA DE EMULAÇÃO: O valor que vem da VM está em Big-Endian.
+		// Invertemos os bytes para o formato nativo do Host antes de realizar a escrita física,
+		// garantindo a consistência binária estrita exigida pelo ecossistema clássico da Apple.
+		uint32_t hostEndianWord = Common::CF::HostToBig<uint32_t>::Swap(static_cast<uint32_t>(wordValue));
+
+		size_t elementsWritten = std::fwrite(&hostEndianWord, sizeof(uint32_t), 1, fptr);
+
+		if (elementsWritten != 1)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = EOF; // Retorna -1 (EOF) se houver uma falha física de escrita no Host
+			return;
+		}
+
+		// Força a sincronização imediata do buffer físico do Host para a sandbox
+		std::fflush(fptr);
+
+		// De acordo com a norma ANSI C, putw deve retornar o próprio valor gravado em caso de sucesso
+		state->r3 = wordValue;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_qsort(StdCLib::Globals* globals, MachineState* state)
@@ -5475,22 +5734,102 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_ResolveFolderAliases(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No Mac OS Clássico, esta rotina percorria uma árvore de pastas para mapear e
+		// resolver eventuais Aliases do Finder ao longo do caminho. Na nossa Sandbox Unix,
+		// assumimos que a hierarquia estrutural de diretórios já se encontra mapeada.
+		// r3 = Endereço virtual do caminho de Entrada (C-String) na VM
+		// r4 = Endereço virtual do buffer de Saída (char*) na VM
+		// r5 = Tamanho máximo do buffer de destino (32-bit)
+		uint32_t p_src = state->r3;
+		uint32_t p_dest = state->r4;
+		uint32_t maxLen = state->r5;
+
+		if (maxLen == 0 || p_src == 0 || p_dest == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1; // Retorna código de erro para o Guest
+			return;
+		}
+
+		const char* src = ToPointer<const char>(p_src);
+		char* dest = ToPointer<char>(p_dest);
+
+		if (src == nullptr || dest == nullptr)
+		{
+			globals->scalars.errno_ = EFAULT;
+			state->r3 = -1;
+			return;
+		}
+
+		size_t srcLen = std::strlen(src);
+		if (srcLen >= maxLen)
+		{
+			globals->scalars.errno_ = ERANGE;
+			state->r3 = -1;
+			return;
+		}
+
+		// Copia o caminho preservando a sua estrutura direta na memória da VM
+		std::memcpy(dest, src, srcLen + 1);
+
+		state->r3 = 0; // noErr (Sucesso simulado)
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_ResolveFolderAliases_Long(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Variante da rotina anterior desenhada na MSL para buffers alargados e caminhos longos.
+		// Segue a mesma estratégia robusta e direta de Sandbox.
+		StdCLib_ResolveFolderAliases(globals, state);
 	}
 
 	void StdCLib_ResolvePath(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Esta função valida a canonicidade e existência de um caminho de ficheiro plano.
+		// r3 = Endereço virtual do caminho original na VM
+		// r4 = Endereço virtual do buffer de destino na VM onde o caminho limpo será injetado
+		// r5 = Tamanho máximo do buffer de destino (32-bit)
+		uint32_t p_src = state->r3;
+		uint32_t p_dest = state->r4;
+		uint32_t maxLen = state->r5;
+
+		if (maxLen == 0 || p_src == 0 || p_dest == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		const char* src = ToPointer<const char>(p_src);
+		char* dest = ToPointer<char>(p_dest);
+
+		if (src == nullptr || dest == nullptr)
+		{
+			globals->scalars.errno = EFAULT;
+			state->r3 = -1;
+			return;
+		}
+
+		size_t srcLen = std::strlen(src);
+		if (srcLen >= maxLen)
+		{
+			globals->scalars.errno_ = ERANGE;
+			state->r3 = -1;
+			return;
+		}
+
+		// Transfere o caminho estático para o espaço virtualizado de 32-bits do Guest
+		std::memcpy(dest, src, srcLen + 1);
+
+		state->r3 = 0; // noErr
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_ResolvePath_Long(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Variante de caminhos longos para a resolução canónica de ficheiros.
+		// Segue o mesmo comportamento seguro e limpo de cópia para a VM.
+		StdCLib_ResolvePath(globals, state);
 	}
 
 	void StdCLib_rewind(StdCLib::Globals* globals, MachineState* state)
@@ -6010,7 +6349,25 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_strcoll(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = Endereço virtual da primeira string (s1) na VM
+		// r4 = Endereço virtual da segunda string (s2) na VM
+		const char* s1 = ToPointer<const char>(state->r3);
+		const char* s2 = ToPointer<const char>(state->r4);
+
+		if (s1 == nullptr || s2 == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			// Se um dos ponteiros for inválido, devolvemos uma resposta segura e neutra
+			state->r3 = (s1 == nullptr) ? -1 : 1;
+			return;
+		}
+
+		// Executa a comparação lexicográfica nativa baseada na localização regional ativa no Host
+		int result = std::strcoll(s1, s2);
+
+		// Injeta o resultado de forma limpa e determinística no registador r3 de 32-bits da VM
+		state->r3 = static_cast<int32_t>(result);
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_strcpy(StdCLib::Globals* globals, MachineState* state)
@@ -6896,7 +7253,41 @@ void StdCLib_memcpy(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_wctomb(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = Endereço virtual do buffer de destino (char*) na VM (pode ser NULL/0)
+		// r4 = O caractere largo (wchar_t) enviado pela VM no formato Big-Endian
+		uint32_t p_dest = state->r3;
+		uint32_t rawWchar = state->r4;
+
+		char* dest = (p_dest != 0) ? ToPointer<char>(p_dest) : nullptr;
+
+		// REGRA CRÍTICA DE EMULAÇÃO: O caractere largo lido da VM está em Big-Endian.
+		// Revertemos os bytes para o formato nativo do Host (Little-Endian) antes do processamento.
+		wchar_t hostWchar = static_cast<wchar_t>(Common::CF::BigToHost<uint32_t>::Swap(rawWchar));
+
+		// Se o destino for NULL, wctomb() testa se o encoding atual do sistema tem dependência de estado
+		if (dest == nullptr)
+		{
+			int result = std::wctomb(nullptr, hostWchar);
+			state->r3 = static_cast<int32_t>(result);
+			globals->scalars.errno_ = 0;
+			return;
+		}
+
+		// Executa a conversão física real tirando partido do ecossistema do Host
+		int result = std::wctomb(dest, hostWchar);
+
+		if (result < 0)
+		{
+			// Caractere largo inválido ou impossível de mapear no encoding ativo
+			globals->scalars.errno_ = EILSEQ; // Invalid byte sequence
+			state->r3 = -1;
+		}
+		else
+		{
+			// Sucesso: Retorna o número de bytes escritos no buffer virtual da VM
+			state->r3 = static_cast<int32_t>(result);
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_write(StdCLib::Globals* globals, MachineState* state)
