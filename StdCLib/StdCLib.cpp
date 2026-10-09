@@ -2645,15 +2645,152 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 		}
 	}
 
-
-	void StdCLib_fcvt(StdCLib::Globals* globals, MachineState* state)
+    void StdCLib_fcvt(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na ABI PowerPC 32-bit, o argumento flutuante (double) é recebido em FPR1.
+		// Os inteiros e ponteiros subsequentes seguem sequencialmente nos GPRs a partir de r3.
+		// Assinatura clássica: char* fcvt(double value, int ndigit, int* decpt, int* sign)
+		double value = state->fpr[1];
+		int ndigit = static_cast<int>(state->r3);
+		uint32_t p_decpt = state->r4;
+		uint32_t p_sign = state->r5;
+
+		int32_t* v_decpt = ToPointer<int32_t>(p_decpt);
+		int32_t* v_sign = ToPointer<int32_t>(p_sign);
+		
+		// Reutiliza a área global fixa `_lastbuf` para garantir persistência de leitura na VM
+		char* v_staticBuf = ToPointer<char>(globals->scalars._lastbuf);
+
+		if (v_staticBuf == nullptr)
+		{
+			globals->scalars.errno_ = ENOMEM;
+			state->r3 = 0;
+			return;
+		}
+
+		// Blindagem defensiva de limites para o buffer virtual (MSL)
+		if (ndigit < 0) ndigit = 0;
+		if (ndigit > 512) ndigit = 512;
+
+		int decpt = 0;
+		int sign = 0;
+
+		if (std::signbit(value))
+		{
+			sign = 1;
+			value = -value;
+		}
+
+		std::string digits = "";
+
+		if (std::isnan(value))
+		{
+			digits = "nan";
+			decpt = 0;
+		}
+		else if (std::isinf(value))
+		{
+			digits = "inf";
+			decpt = 0;
+		}
+		else
+		{
+			// Ao contrário da ecvt (que mede dígitos totais), a fcvt mede ndigit CASAS DECIMAIS após o ponto.
+			char temp[512];
+			std::snprintf(temp, sizeof(temp), "%.*f", ndigit, value);
+
+			std::string s(temp);
+			size_t dotPos = s.find_first_of_not_of("0123456789-"); // Localiza o separador ou lixo
+
+			// Isolar os dígitos numéricos limpos
+			for (char c : s)
+			{
+				if (std::isdigit(c)) digits += c;
+			}
+
+			// Calcular a posição correta do decpt em relação ao início da string resultante
+			if (value == 0.0)
+			{
+				decpt = 0;
+			}
+			else if (dotPos != std::string::npos)
+			{
+				// Remover lixo residual de sinais no cálculo do offset decimal
+				size_t startDigits = s.find_first_of("0123456789");
+				decpt = (startDigits != std::string::npos && startDigits < dotPos) ? static_cast<int>(dotPos - startDigits) : 0;
+			}
+			else
+			{
+				decpt = static_cast<int>(digits.length() - ndigit);
+			}
+		}
+
+		// Gravação direta na memória virtualizada de 32-bits
+		std::memcpy(v_staticBuf, digits.c_str(), digits.length() + 1);
+		v_staticBuf[digits.length()] = '\0';
+
+		if (v_decpt) *v_decpt = Common::CF::HostToBig<int32_t>::Swap(decpt);
+		if (v_sign)  *v_sign  = Common::CF::HostToBig<int32_t>::Swap(sign);
+
+		state->r3 = globals->scalars._lastbuf;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_fdopen(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Assinatura: FILE* fdopen(int fd, const char* mode)
+		// r3 = descritor nativo (fd) enviado pela aplicação Guest
+		// r4 = endereço virtual da string de modo (ex: "w+", "rb")
+		int fd = static_cast<int>(state->r3);
+		const char* mode = ToPointer<const char>(state->r4);
+
+		if (fd < 0 || mode == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0; // NULL
+			return;
+		}
+
+		// Procurar um slot livre na tabela virtual de streams da ToolBox (_iob)
+		for (int i = 0; i < StdCLib::NFILE; i++)
+		{
+			auto& ioBuffer = globals->scalars._iob[i];
+			uint32_t p_iobAddress = ToIntPtr(&ioBuffer);
+
+			// Se o endereço virtual do buffer iob não estiver no mapa, encontrámos uma vaga
+			if (globals->nativeFileMap.find(p_iobAddress) == globals->nativeFileMap.end())
+			{
+				// Executa a vinculação real do descritor de ficheiros no Host moderno
+				FILE* hostFile = ::fdopen(fd, mode);
+				if (hostFile == nullptr)
+				{
+					globals->scalars.errno_ = errno;
+					state->r3 = 0;
+					return;
+				}
+
+				// Inicializa os campos clássicos da estrutura empacotada vistos pela VM PowerPC
+				ioBuffer._file = i;
+				ioBuffer._flag = 0x01; // Flag de stream aberto padrão MSL
+				ioBuffer._cnt  = 0;
+				ioBuffer._ptr  = 0;
+				ioBuffer._base = 0;
+				ioBuffer._end  = 0;
+				ioBuffer._size = 0;
+
+				// Salvaguarda o par no nosso mapa nativo blindado de 64-bits
+				globals->nativeFileMap[p_iobAddress] = hostFile;
+
+				// Devolve o endereço virtual do stream registado para o registador r3
+				state->r3 = p_iobAddress;
+				globals->scalars.errno_ = 0;
+				return;
+			}
+		}
+
+		// Se a tabela física _iob atingir o limite estático NFILE (40)
+		globals->scalars.errno_ = EMFILE;
+		state->r3 = 0;
 	}
 
 	void StdCLib_feof(StdCLib::Globals* globals, MachineState* state)
@@ -2737,7 +2874,48 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_fgetpos(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = Endereço virtual da estrutura PPCFILE na VM
+		// r4 = Ponteiro virtual para o fpos_t de destino na VM (Big-Endian, 64-bit)
+		uint32_t p_iob = state->r3;
+		uint32_t p_fpos = state->r4;
+
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+		uint64_t* v_fpos = ToPointer<uint64_t>(p_fpos);
+
+		if (fptr == nullptr || v_fpos == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1; // Retorna erro (-1) conforme a norma ANSI C
+			return;
+		}
+
+		// Usamos fgetpos nativo do host para extrair a posição física
+		fpos_t hostPos;
+		int result = std::fgetpos(fptr, &hostPos);
+
+		if (result != 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1;
+			return;
+		}
+
+		// Mapeamos o valor do host de forma segura para o tipo inteiro de 64-bits da VM.
+		// Em POSIX moderno, fpos_t pode ser uma estrutura interna, por isso fazemos o cast 
+		// explícito do offset recorrendo a fseeko/ftello se necessário, ou convertendo o tipo diretamente.
+#if defined(__APPLE__) || defined(__linux__)
+		// Abstração segura do valor numérico real de 64-bits do fpos_t
+		uint64_t rawPosition = static_cast<uint64_t>(hostPos.__pos);
+#else
+		uint64_t rawPosition = static_cast<uint64_t>(std::ftell(fptr));
+#endif
+
+		// Inversão crucial de Endianness antes de depositar no espaço de endereçamento da VM
+		*v_fpos = Common::CF::HostToBig<uint64_t>::Swap(rawPosition);
+
+		// O fgetpos devolve 0 em caso de sucesso absoluto
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_fgets(StdCLib::Globals* globals, MachineState* state)
@@ -2870,7 +3048,39 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_fputs(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = Endereço virtual da string de caracteres (C-String) na VM
+		// r4 = Endereço virtual da estrutura PPCFILE (stream) na VM
+		uint32_t p_str = state->r3;
+		uint32_t p_iob = state->r4;
+
+		const char* str = ToPointer<const char>(p_str);
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+
+		// Blindagem defensiva contra ponteiros nulos ou descritores inválidos enviados pela VM
+		if (fptr == nullptr || str == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = -1; // EOF canónico em caso de falha de descritor
+			return;
+		}
+
+		// Executa a escrita da string física no Host moderno
+		int result = std::fputs(str, fptr);
+		
+		if (result >= 0)
+		{
+			// Força a sincronização imediata do buffer físico do Host para a sandbox
+			std::fflush(fptr);
+
+			// A especificação ANSI C dita que fputs deve retornar um valor não-negativo em caso de sucesso
+			state->r3 = 0; 
+			globals->scalars.errno_ = 0;
+		}
+		else
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = -1; // Retorna EOF (-1) em caso de falha física de escrita no Host
+		}
 	}
 
 	void StdCLib_fread(StdCLib::Globals* globals, MachineState* state)
@@ -2910,7 +3120,63 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_freopen(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = Endereço virtual do caminho do ficheiro (filename) na VM
+		// r4 = Endereço virtual da string de modo (mode) na VM (ex: "w")
+		// r5 = Endereço virtual da estrutura PPCFILE (stream original) na VM
+		const char* filename = ToPointer<const char>(state->r3);
+		const char* mode = ToPointer<const char>(state->r4);
+		uint32_t p_iobAddress = state->r5;
+
+		if (mode == nullptr || p_iobAddress == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0; // Devolve NULL para a VM
+			return;
+		}
+
+		// Localiza o stream atual no mapa nativo seguro de 64 bits do Host
+		auto it = globals->nativeFileMap.find(p_iobAddress);
+		FILE* oldHostFile = (it != globals->nativeFileMap.end()) ? it->second : nullptr;
+
+		// Executa o freopen real no Host. 
+		// Se oldHostFile for nulo, tentamos abrir diretamente preservando o comportamento POSIX.
+		FILE* newHostFile = ::freopen(filename, mode, oldHostFile ? oldHostFile : stdin);
+
+		if (newHostFile == nullptr)
+		{
+			globals->scalars.errno_ = errno;
+			
+			// Se o freopen falhar, o stream original deixa de ser válido. 
+			// Removemo-lo defensivamente do mapa para evitar leaks ou acessos a ponteiros mortos.
+			if (it != globals->nativeFileMap.end())
+			{
+				globals->nativeFileMap.erase(it);
+			}
+			state->r3 = 0; // Retorna NULL indicando falha crítica
+			return;
+		}
+
+		// Atualiza o mapa nativo associando o novo ponteiro de ficheiro do Host ao mesmo endereço virtual
+		globals->nativeFileMap[p_iobAddress] = newHostFile;
+
+		// Atualiza os metadados clássicos da estrutura _iob por cortesia à VM
+		for (int i = 0; i < StdCLib::NFILE; i++)
+		{
+			if (ToIntPtr(&globals->scalars._iob[i]) == p_iobAddress)
+			{
+				globals->scalars._iob[i]._flag = 0x01; // Garante a flag de aberto da MSL
+				globals->scalars._iob[i]._cnt  = 0;
+				globals->scalars._iob[i]._ptr  = 0;
+				globals->scalars._iob[i]._base = 0;
+				globals->scalars._iob[i]._end  = 0;
+				globals->scalars._iob[i]._size = 0;
+				break;
+			}
+		}
+
+		// A ABI dita que devolve o endereço virtual original da estrutura de stream (32-bits)
+		state->r3 = p_iobAddress;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_fscanf(StdCLib::Globals* globals, MachineState* state)
@@ -3158,9 +3424,58 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_FSMakeFSSpec_Long(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
-	}
+		// Na convenção da MSL para a ToolBox clássica, esta função recebe:
+		// r3 = vRefNum padrão (16-bit, ex: boot volume) ou dirID combinado
+		// r4 = dirID original (32-bit) se aplicável
+		// r5 = endereço virtual da string do caminho (C-String longa) na VM
+		// gpr[6] = endereço virtual da estrutura FSSpec de destino na VM
+		int16_t vRefNum = static_cast<int16_t>(state->r3 & 0xFFFF);
+		uint32_t dirID = state->r4;
+		const char* pathStr = ToPointer<const char>(state->r5);
+		uint32_t p_destSpec = state->gpr[6];
 
+		PEF::FSSpec* destSpec = ToPointer<PEF::FSSpec>(p_destSpec);
+
+		if (destSpec == nullptr || pathStr == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -43; // fnfErr (File Not Found / Erro genérico de ficheiro na ToolBox)
+			return;
+		}
+
+		// Inicializa a estrutura FSSpec virtual a zeros
+		std::memset(destSpec, 0, sizeof(PEF::FSSpec));
+
+		// Simulamos identificadores canónicos para o nosso sistema de Sandbox Unix local
+		destSpec->vRefNum = Common::CF::HostToBig<int16_t>::Swap(vRefNum == 0 ? -1 : vRefNum);
+		destSpec->parID   = Common::CF::HostToBig<uint32_t>::Swap(dirID == 0 ? 2 : dirID); // 2 é a rootDirID clássica
+
+		// Processamos a string longa para extrair apenas o nome do ficheiro (o último componente)
+		std::string fullPath(pathStr);
+		size_t lastSlash = fullPath.find_last_of("/:"); // Lida tanto com caminhos Unix como HFS clássicos (separados por ':')
+		
+		std::string fileName = (lastSlash == std::string::npos) ? fullPath : fullPath.substr(lastSlash + 1);
+
+		// Um FSSpec clássico armazena o nome como uma Pascal String (Str63). 
+		// O tamanho máximo absoluto do array 'name' é de 63 caracteres.
+		size_t nameLen = fileName.length();
+		if (nameLen > 63)
+		{
+			nameLen = 63; // Truncagem defensiva para preservar os limites de memória da VM
+		}
+
+		// Gravação no formato Pascal: byte 0 é o tamanho, seguido dos caracteres físicos
+		destSpec->name[0] = static_cast<uint8_t>(nameLen);
+		if (nameLen > 0)
+		{
+			std::memcpy(&destSpec->name[1], fileName.c_str(), nameLen);
+		}
+
+		// Retorna noErr (0) indicando que a especificação de ficheiro virtual foi gerada com sucesso
+		state->r3 = 0; 
+		globals->scalars.errno_ = 0;
+	}
+			
 	void StdCLib_FSp_creat(StdCLib::Globals* globals, MachineState* state)
 	{
 		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
@@ -3257,7 +3572,67 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_FSp_freopen(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = Endereço virtual da estrutura FSSpec de origem na VM
+		// r4 = Endereço virtual da string de modo (mode) na VM (ex: "rb", "w+")
+		// r5 = Endereço virtual da estrutura PPCFILE (stream a ser redirecionado) na VM
+		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
+		uint32_t p_mode = state->r4;
+		uint32_t p_iobAddress = state->r5;
+
+		const char* mode = ToPointer<const char>(p_mode);
+
+		if (spec == nullptr || mode == nullptr || p_iobAddress == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = 0; // Devolve NULL (0) em caso de ponteiros inválidos
+			return;
+		}
+
+		// Converte a estrutura FSSpec virtual para um caminho Unix utilizável no Host
+		std::string hostPath = FSSpecToHostPath(spec);
+
+		// Localiza o stream atual que a aplicação pretende reaproveitar no mapa nativo
+		auto it = globals->nativeFileMap.find(p_iobAddress);
+		FILE* oldHostFile = (it != globals->nativeFileMap.end()) ? it->second : nullptr;
+
+		// Executa o freopen físico no Host. Se oldHostFile for nulo, assume stdin por segurança POSIX.
+		FILE* newHostFile = ::freopen(hostPath.c_str(), mode, oldHostFile ? oldHostFile : stdin);
+
+		if (newHostFile == nullptr)
+		{
+			globals->scalars.errno_ = errno;
+			
+			// Se falhar, o stream original fica corrompido ou fechado.
+			// Removemo-lo defensivamente do mapa para mitigar dangling pointers.
+			if (it != globals->nativeFileMap.end())
+			{
+				globals->nativeFileMap.erase(it);
+			}
+			state->r3 = 0; // NULL
+			return;
+		}
+
+		// Atualiza a associação do ID virtual de 32-bits para o novo ponteiro do Host
+		globals->nativeFileMap[p_iobAddress] = newHostFile;
+
+		// Sincroniza e limpa as flags da estrutura clássica _iob correspondente
+		for (int i = 0; i < StdCLib::NFILE; i++)
+		{
+			if (ToIntPtr(&globals->scalars._iob[i]) == p_iobAddress)
+			{
+				globals->scalars._iob[i]._flag = 0x01; // Flag MSL de aberto
+				globals->scalars._iob[i]._cnt  = 0;
+				globals->scalars._iob[i]._ptr  = 0;
+				globals->scalars._iob[i]._base = 0;
+				globals->scalars._iob[i]._end  = 0;
+				globals->scalars._iob[i]._size = 0;
+				break;
+			}
+		}
+
+		// A convenção dita o retorno do endereço virtual de 32-bits do próprio stream reaberto
+		state->r3 = p_iobAddress;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_FSp_fsetfileinfo(StdCLib::Globals* globals, MachineState* state)
@@ -3290,7 +3665,55 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_FSp_open(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// r3 = Endereço virtual da estrutura FSSpec na VM
+		// r4 = Flags de abertura clássicas da MSL/Macintosh (permissões de acesso)
+		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
+		uint32_t classicFlags = state->r4;
+
+		if (spec == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		// Converte o FSSpec virtualizado para o caminho físico do Host na nossa sandbox
+		std::string hostPath = FSSpecToHostPath(spec);
+
+		// Tradução segura das flags clássicas da Apple para o POSIX moderno do Host
+		int hostFlags = 0;
+		
+		// Isolar o modo de acesso básico (tipicamente os 2 bits inferiores)
+		uint32_t accmode = classicFlags & 0x03; 
+		if (accmode == 0)      hostFlags |= O_RDONLY; // Leitura pura
+		else if (accmode == 1) hostFlags |= O_WRONLY; // Escrita pura
+		else if (accmode == 2) hostFlags |= O_RDWR;   // Leitura e Escrita
+		
+		// Mapeamento de flags de controlo adicionais (O_CREAT, O_TRUNC, etc.)
+		if (classicFlags & 0x0100) hostFlags |= O_CREAT;
+		if (classicFlags & 0x0200) hostFlags |= O_EXCL;
+		if (classicFlags & 0x0400) hostFlags |= O_TRUNC;
+		if (classicFlags & 0x0800) hostFlags |= O_APPEND;
+		if (classicFlags & 0x2000) hostFlags |= O_NONBLOCK;
+
+		// Como esta função abre descritores de baixo nível (e não FILE*), 
+		// usamos a chamada de sistema open nativa, aplicando permissões padrão se criar
+		int fd = ::open(hostPath.c_str(), hostFlags, 0666);
+
+		if (fd < 0)
+		{
+			globals->scalars.errno_ = errno;
+			
+			// Devolvemos um código de erro numérico clássico da ToolBox do Macintosh.
+			// -43 equivale a fnfErr (File Not Found) se o ficheiro não existir.
+			state->r3 = (errno == ENOENT) ? -43 : -1;
+		}
+		else
+		{
+			// Sucesso: Retornamos o descritor de ficheiro numérico mapeado em 32-bits
+			state->r3 = static_cast<int32_t>(fd);
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_FSp_remove(StdCLib::Globals* globals, MachineState* state)
@@ -3320,18 +3743,89 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_FSp_rename(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// No Mac OS Clássico/MSL, esta rotina altera o nome de um ficheiro especificado por um FSSpec.
+		// r3 = Endereço virtual da estrutura FSSpec original na VM
+		// r4 = Endereço virtual da string (C-String ou Pascal dependendo da variante, tipicamente C-String na MSL) com o novo nome
+		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
+		const char* newName = ToPointer<const char>(state->r4);
+
+		if (spec == nullptr || newName == nullptr)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		// Obtemos o caminho Unix original completo da nossa Sandbox através do FSSpec
+		std::string oldHostPath = FSSpecToHostPath(spec);
+
+		// Para montar o novo caminho, extraímos o diretório pai do caminho antigo
+		std::string newHostPath = "./";
+		size_t lastSlash = oldHostPath.find_last_of('/');
+		if (lastSlash != std::string::npos)
+		{
+			newHostPath = oldHostPath.substr(0, lastSlash + 1);
+		}
+
+		// Adicionamos o novo nome ao diretório pai mapeado
+		newHostPath += newName;
+
+		// Executa a operação física de renomeação no Host moderno
+		int result = std::rename(oldHostPath.c_str(), newHostPath.c_str());
+
+		if (result != 0)
+		{
+			globals->scalars.errno_ = errno;
+			state->r3 = (errno == ENOENT) ? -43 : -1; // -43 = fnfErr (File Not Found)
+		}
+		else
+		{
+			state->r3 = 0; // noErr
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_FSp_unlink(StdCLib::Globals* globals, MachineState* state)
 	{
-		// No ecossistema POSIX do Host, unlink e remove para ficheiros regulares são idênticos
+		// Mantemos a tua excelente otimização defensiva: no ecossistema POSIX, 
+		// unlink de um FSSpec mapeia diretamente para o comportamento do FSp_remove.
 		StdCLib_FSp_remove(globals, state);
 	}
 
 	void StdCLib_FSSpec2Path_Long(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Esta rotina realiza a engenharia inversa: lê um FSSpec e converte-o num caminho nativo longo.
+		// r3 = Endereço virtual do FSSpec de entrada na VM
+		// r4 = Endereço virtual do buffer de destino (char*) na VM onde vamos escrever a string do caminho
+		// r5 = Tamanho máximo do buffer de destino alocado pela aplicação Guest (32-bit)
+		const PEF::FSSpec* spec = ToPointer<const PEF::FSSpec>(state->r3);
+		char* destBuffer = ToPointer<char>(state->r4);
+		uint32_t maxLen = state->r5;
+
+		if (spec == nullptr || destBuffer == nullptr || maxLen == 0)
+		{
+			globals->scalars.errno_ = EINVAL;
+			state->r3 = -1;
+			return;
+		}
+
+		// Invocamos a nossa função interna de Sandbox para reconstruir o caminho Unix virtualizado
+		std::string hostPath = FSSpecToHostPath(spec);
+
+		// Validamos se o tamanho do caminho cabe no espaço virtual alocado pela VM (incluindo o '\0')
+		if (hostPath.length() >= maxLen)
+		{
+			globals->scalars.errno_ = ERANGE; // Buffer demasiado pequeno
+			state->r3 = -1;
+			return;
+		}
+
+		// Escrevemos a string longa diretamente na memória virtual de 32-bits mapeada do Guest
+		std::memcpy(destBuffer, hostPath.c_str(), hostPath.length() + 1);
+
+		// Devolvemos 0 (noErr) para o registador r3 da CPU virtual indicando sucesso absoluto
+		state->r3 = 0;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_ftell(StdCLib::Globals* globals, MachineState* state)
@@ -3381,7 +3875,33 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 
 	void StdCLib_getc(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na especificação do C Standard, getc(FILE* stream) pode ser implementado como 
+		// um macro de alta velocidade. No ClassiX, ele atua exatamente como um fgetc.
+		// r3 = Endereço virtual da estrutura PPCFILE (stream) na VM
+		uint32_t p_iob = state->r3;
+		FILE* fptr = MakeFilePtr(globals, p_iob);
+		
+		if (fptr == nullptr)
+		{
+			globals->scalars.errno_ = EBADF;
+			state->r3 = EOF; // Retorna -1 (EOF canónico) para a CPU emulada
+			return;
+		}
+
+		// Realiza a leitura física do byte diretamente através do Host
+		int result = std::fgetc(fptr);
+		if (result == EOF)
+		{
+			// Se falhou, verifica se foi um erro real de I/O ou apenas o fim do ficheiro
+			globals->scalars.errno_ = std::ferror(fptr) ? errno : 0;
+			state->r3 = EOF;
+		}
+		else
+		{
+			// Sucesso: Retorna o byte como um unsigned char estrito limpo em 32-bits
+			state->r3 = result & 0xFF;
+			globals->scalars.errno_ = 0;
+		}
 	}
 
 	void StdCLib_getchar(StdCLib::Globals* globals, MachineState* state)
@@ -3447,7 +3967,50 @@ void StdCLib_faccess(StdCLib::Globals* globals, MachineState* state)
 	
 	void StdCLib_getIDstring(StdCLib::Globals* globals, MachineState* state)
 	{
-		throw PPCVM::NotImplementedException(__func__);
+		// Na convenção interna da MSL:
+		// r3 = ID ou seletor do tipo de string de metadados solicitada
+		// A função deve devolver o endereço virtual de uma C-String descritiva.
+		uint32_t stringSelector = state->r3;
+
+		// Mapeamos o buffer virtual estático seguro a partir dos scalars
+		char* v_staticBuf = ToPointer<char>(globals->scalars._lastbuf);
+		if (v_staticBuf == nullptr)
+		{
+			globals->scalars.errno_ = ENOMEM;
+			state->r3 = 0; // NULL
+			return;
+		}
+
+		std::string idString;
+
+		// Diferenciamos a assinatura com base no seletor enviado pela aplicação Guest
+		switch (stringSelector)
+		{
+			case 0:
+				idString = "ClassiX Metrowerks Standard Library Wrapper (PPC)";
+				break;
+			case 1:
+				idString = "MSL C PPC 4.0 Compatibility Layer";
+				break;
+			case 2:
+				idString = "Félix Cloutier Core Runtime (C) 2012 Fork";
+				break;
+			default:
+				idString = "MSL Generic Runtime Identifier";
+				break;
+		}
+
+		// Validamos o tamanho da assinatura para não transbordar o espaço de _lastbuf
+		size_t len = idString.length();
+		if (len >= 512) len = 511; // Proteção estrita de limite de bloco
+
+		// Escrevemos os metadados diretamente na memória virtual de 32-bits mapeada do emulador
+		std::memcpy(v_staticBuf, idString.c_str(), len);
+		v_staticBuf[len] = '\0'; // Terminação nula garantida
+
+		// Devolvemos o endereço virtual do buffer estático para o registador r3 da CPU emulada
+		state->r3 = globals->scalars._lastbuf;
+		globals->scalars.errno_ = 0;
 	}
 
 	void StdCLib_getpid(StdCLib::Globals* globals, MachineState* state)
