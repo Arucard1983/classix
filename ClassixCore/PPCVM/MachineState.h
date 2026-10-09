@@ -26,7 +26,16 @@
 
 namespace PPCVM
 {
-	struct MachineState
+	// Estrutura para os registadores vetoriais AltiVec (128 bits / 16 bytes)
+	union AltiVecRegister
+	{
+		uint8_t   u8[16];
+		uint16_t  u16[8];
+		uint32_t  u32[4];
+		float     f32[4];
+	};
+
+    struct MachineState
 	{
 		union
 		{
